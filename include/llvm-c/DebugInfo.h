@@ -1020,7 +1020,8 @@ LLVMMetadataRef LLVMDIBuilderCreateGlobalVariableExpression(
     LLVMDIBuilderRef Builder, LLVMMetadataRef Scope, const char *Name,
     size_t NameLen, const char *Linkage, size_t LinkLen, LLVMMetadataRef File,
     unsigned LineNo, LLVMMetadataRef Ty, LLVMBool LocalToUnit,
-    LLVMMetadataRef Expr, LLVMMetadataRef Decl, uint32_t AlignInBits);
+    LLVMMetadataRef Expr, LLVMMetadataRef Decl, LLVMDIFlags Flags,
+    uint32_t AlignInBits);
 /**
  * Create a new temporary \c MDNode.  Suitable for use in constructing cyclic
  * \c MDNode structures. A temporary \c MDNode is not uniqued, may be RAUW'd,
@@ -1070,7 +1071,7 @@ LLVMMetadataRef LLVMDIBuilderCreateTempGlobalVariableFwdDecl(
     LLVMDIBuilderRef Builder, LLVMMetadataRef Scope, const char *Name,
     size_t NameLen, const char *Linkage, size_t LnkLen, LLVMMetadataRef File,
     unsigned LineNo, LLVMMetadataRef Ty, LLVMBool LocalToUnit,
-    LLVMMetadataRef Decl, uint32_t AlignInBits);
+    LLVMMetadataRef Decl, LLVMDIFlags Flags, uint32_t AlignInBits);
 
 /**
  * Insert a new llvm.dbg.declare intrinsic call before the given instruction.
