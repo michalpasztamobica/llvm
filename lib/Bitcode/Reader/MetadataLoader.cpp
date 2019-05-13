@@ -1632,20 +1632,35 @@ Error MetadataLoader::MetadataLoaderImpl::parseOneMetadata(
     break;
   }
   case bitc::METADATA_GLOBAL_VAR: {
-    if (Record.size() < 11 || Record.size() > 12)
+    if (Record.size() < 11 || Record.size() > 13)
       return error("Invalid record");
 
     IsDistinct = Record[0] & 1;
     unsigned Version = Record[0] >> 1;
 
-    if (Version == 1) {
+    if (Version == 3) {
+      // Add support for DIFlags
+      MetadataList.assignValue(
+          GET_OR_DISTINCT(
+              DIGlobalVariable,
+              (Context, getMDOrNull(Record[1]), getMDString(Record[2]),
+               getMDString(Record[3]), getMDOrNull(Record[4]), Record[5],
+               getDITypeRefOrNull(Record[6]), Record[7], Record[8],
+               getMDOrNull(Record[10]),
+               static_cast<DINode::DIFlags>(Record[11]), Record[12])),
+          NextMetadataNo);
+
+      NextMetadataNo++;
+    } else if (Version == 1) {
+      // No upgrade necessary. A null field will be introduced to indicate
+      // that no parameter information is available.
       MetadataList.assignValue(
           GET_OR_DISTINCT(DIGlobalVariable,
                           (Context, getMDOrNull(Record[1]),
                            getMDString(Record[2]), getMDString(Record[3]),
                            getMDOrNull(Record[4]), Record[5],
                            getDITypeRefOrNull(Record[6]), Record[7], Record[8],
-                           getMDOrNull(Record[10]), Record[11])),
+                           getMDOrNull(Record[10]), DINode::FlagZero, Record[11])),
           NextMetadataNo);
       NextMetadataNo++;
     } else if (Version == 0) {
@@ -1677,7 +1692,7 @@ Error MetadataLoader::MetadataLoaderImpl::parseOneMetadata(
           (Context, getMDOrNull(Record[1]), getMDString(Record[2]),
            getMDString(Record[3]), getMDOrNull(Record[4]), Record[5],
            getDITypeRefOrNull(Record[6]), Record[7], Record[8],
-           getMDOrNull(Record[10]), AlignInBits));
+           getMDOrNull(Record[10]), DINode::FlagZero, AlignInBits));
 
       DIGlobalVariableExpression *DGVE = nullptr;
       if (Attach || Expr)

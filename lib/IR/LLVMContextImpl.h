@@ -1008,16 +1008,19 @@ template <> struct MDNodeKeyImpl<DIGlobalVariable> {
   bool IsLocalToUnit;
   bool IsDefinition;
   Metadata *StaticDataMemberDeclaration;
+  unsigned Flags;
   uint32_t AlignInBits;
 
   MDNodeKeyImpl(Metadata *Scope, MDString *Name, MDString *LinkageName,
                 Metadata *File, unsigned Line, Metadata *Type,
                 bool IsLocalToUnit, bool IsDefinition,
-                Metadata *StaticDataMemberDeclaration, uint32_t AlignInBits)
+                Metadata *StaticDataMemberDeclaration,
+                unsigned Flags, uint32_t AlignInBits)
       : Scope(Scope), Name(Name), LinkageName(LinkageName), File(File),
         Line(Line), Type(Type), IsLocalToUnit(IsLocalToUnit),
         IsDefinition(IsDefinition),
         StaticDataMemberDeclaration(StaticDataMemberDeclaration),
+        Flags(Flags),
         AlignInBits(AlignInBits) {}
   MDNodeKeyImpl(const DIGlobalVariable *N)
       : Scope(N->getRawScope()), Name(N->getRawName()),
@@ -1025,7 +1028,7 @@ template <> struct MDNodeKeyImpl<DIGlobalVariable> {
         Line(N->getLine()), Type(N->getRawType()),
         IsLocalToUnit(N->isLocalToUnit()), IsDefinition(N->isDefinition()),
         StaticDataMemberDeclaration(N->getRawStaticDataMemberDeclaration()),
-        AlignInBits(N->getAlignInBits()) {}
+        Flags(N->getFlags()), AlignInBits(N->getAlignInBits()) {}
 
   bool isKeyOf(const DIGlobalVariable *RHS) const {
     return Scope == RHS->getRawScope() && Name == RHS->getRawName() &&
@@ -1035,6 +1038,7 @@ template <> struct MDNodeKeyImpl<DIGlobalVariable> {
            IsDefinition == RHS->isDefinition() &&
            StaticDataMemberDeclaration ==
                RHS->getRawStaticDataMemberDeclaration() &&
+           Flags == RHS->getFlags() &&
            AlignInBits == RHS->getAlignInBits();
   }
 
@@ -1048,7 +1052,7 @@ template <> struct MDNodeKeyImpl<DIGlobalVariable> {
     // TODO: make hashing work fine with such situations
     return hash_combine(Scope, Name, LinkageName, File, Line, Type,
                         IsLocalToUnit, IsDefinition, /* AlignInBits, */
-                        StaticDataMemberDeclaration);
+                        StaticDataMemberDeclaration, Flags);
   }
 };
 

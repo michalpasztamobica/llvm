@@ -1230,12 +1230,13 @@ LLVMDIBuilderCreateGlobalVariableExpression(LLVMDIBuilderRef Builder,
                                             LLVMBool LocalToUnit,
                                             LLVMMetadataRef Expr,
                                             LLVMMetadataRef Decl,
+                                            LLVMDIFlags Flags,
                                             uint32_t AlignInBits) {
   return wrap(unwrap(Builder)->createGlobalVariableExpression(
                   unwrapDI<DIScope>(Scope), {Name, NameLen}, {Linkage, LinkLen},
                   unwrapDI<DIFile>(File), LineNo, unwrapDI<DIType>(Ty),
                   LocalToUnit, unwrap<DIExpression>(Expr),
-                  unwrapDI<MDNode>(Decl), AlignInBits));
+                  unwrapDI<MDNode>(Decl), map_from_llvmDIFlags(Flags), AlignInBits));
 }
 
 LLVMMetadataRef LLVMTemporaryMDNode(LLVMContextRef Ctx, LLVMMetadataRef *Data,
@@ -1265,11 +1266,12 @@ LLVMDIBuilderCreateTempGlobalVariableFwdDecl(LLVMDIBuilderRef Builder,
                                              LLVMMetadataRef Ty,
                                              LLVMBool LocalToUnit,
                                              LLVMMetadataRef Decl,
+                                             LLVMDIFlags Flags,
                                              uint32_t AlignInBits) {
   return wrap(unwrap(Builder)->createTempGlobalVariableFwdDecl(
                   unwrapDI<DIScope>(Scope), {Name, NameLen}, {Linkage, LnkLen},
                   unwrapDI<DIFile>(File), LineNo, unwrapDI<DIType>(Ty),
-                  LocalToUnit, unwrapDI<MDNode>(Decl), AlignInBits));
+                  LocalToUnit, unwrapDI<MDNode>(Decl), map_from_llvmDIFlags(Flags), AlignInBits));
 }
 
 LLVMValueRef LLVMDIBuilderInsertDeclareBefore(

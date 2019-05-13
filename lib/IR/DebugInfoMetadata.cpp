@@ -666,7 +666,7 @@ DIGlobalVariable *
 DIGlobalVariable::getImpl(LLVMContext &Context, Metadata *Scope, MDString *Name,
                           MDString *LinkageName, Metadata *File, unsigned Line,
                           Metadata *Type, bool IsLocalToUnit, bool IsDefinition,
-                          Metadata *StaticDataMemberDeclaration,
+                          Metadata *StaticDataMemberDeclaration, DIFlags Flags,
                           uint32_t AlignInBits, StorageType Storage,
                           bool ShouldCreate) {
   assert(isCanonical(Name) && "Expected canonical MDString");
@@ -674,11 +674,11 @@ DIGlobalVariable::getImpl(LLVMContext &Context, Metadata *Scope, MDString *Name,
   DEFINE_GETIMPL_LOOKUP(DIGlobalVariable,
                         (Scope, Name, LinkageName, File, Line, Type,
                          IsLocalToUnit, IsDefinition,
-                         StaticDataMemberDeclaration, AlignInBits));
+                         StaticDataMemberDeclaration, Flags, AlignInBits));
   Metadata *Ops[] = {
       Scope, Name, File, Type, Name, LinkageName, StaticDataMemberDeclaration};
   DEFINE_GETIMPL_STORE(DIGlobalVariable,
-                       (Line, IsLocalToUnit, IsDefinition, AlignInBits),
+                       (Line, IsLocalToUnit, IsDefinition, Flags, AlignInBits),
                        Ops);
 }
 

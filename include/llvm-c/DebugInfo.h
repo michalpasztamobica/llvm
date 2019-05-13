@@ -979,6 +979,7 @@ LLVMDIBuilderCreateGlobalVariableExpression(LLVMDIBuilderRef Builder,
                                             LLVMBool LocalToUnit,
                                             LLVMMetadataRef Expr,
                                             LLVMMetadataRef Decl,
+                                            LLVMDIFlags Flags,
                                             uint32_t AlignInBits);
 /**
  * Create a new temporary \c MDNode.  Suitable for use in constructing cyclic
@@ -1035,6 +1036,7 @@ LLVMDIBuilderCreateTempGlobalVariableFwdDecl(LLVMDIBuilderRef Builder,
                                              LLVMMetadataRef Ty,
                                              LLVMBool LocalToUnit,
                                              LLVMMetadataRef Decl,
+                                             LLVMDIFlags Flags,
                                              uint32_t AlignInBits);
 
 /**

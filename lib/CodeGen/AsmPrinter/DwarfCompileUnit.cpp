@@ -261,7 +261,8 @@ DIE *DwarfCompileUnit::getOrCreateGlobalVariableDIE(
   } else {
     DeclContext = GV->getScope();
     // Add name and type.
-    addString(*VariableDIE, dwarf::DW_AT_name, GV->getDisplayName());
+    if (!GV->getDisplayName().empty())
+      addString(*VariableDIE, dwarf::DW_AT_name, GV->getDisplayName());
     addType(*VariableDIE, GTy);
 
     // Add scoping info.
@@ -276,6 +277,9 @@ DIE *DwarfCompileUnit::getOrCreateGlobalVariableDIE(
     addFlag(*VariableDIE, dwarf::DW_AT_declaration);
   else
     addGlobalName(GV->getName(), *VariableDIE, DeclContext);
+
+  if (GV->isArtificial())
+    addFlag(*VariableDIE, dwarf::DW_AT_artificial);
 
   if (uint32_t AlignInBytes = GV->getAlignInBytes())
     addUInt(*VariableDIE, dwarf::DW_AT_alignment, dwarf::DW_FORM_udata,
