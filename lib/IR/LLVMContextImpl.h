@@ -1007,25 +1007,27 @@ template <> struct MDNodeKeyImpl<DIGlobalVariable> {
   bool IsDefinition;
   Metadata *StaticDataMemberDeclaration;
   Metadata *TemplateParams;
+  unsigned Flags;
   uint32_t AlignInBits;
 
   MDNodeKeyImpl(Metadata *Scope, MDString *Name, MDString *LinkageName,
                 Metadata *File, unsigned Line, Metadata *Type,
                 bool IsLocalToUnit, bool IsDefinition,
                 Metadata *StaticDataMemberDeclaration, Metadata *TemplateParams,
-                uint32_t AlignInBits)
+                unsigned Flags, uint32_t AlignInBits)
       : Scope(Scope), Name(Name), LinkageName(LinkageName), File(File),
         Line(Line), Type(Type), IsLocalToUnit(IsLocalToUnit),
         IsDefinition(IsDefinition),
         StaticDataMemberDeclaration(StaticDataMemberDeclaration),
-        TemplateParams(TemplateParams), AlignInBits(AlignInBits) {}
+        TemplateParams(TemplateParams), Flags(Flags),
+        AlignInBits(AlignInBits) {}
   MDNodeKeyImpl(const DIGlobalVariable *N)
       : Scope(N->getRawScope()), Name(N->getRawName()),
         LinkageName(N->getRawLinkageName()), File(N->getRawFile()),
         Line(N->getLine()), Type(N->getRawType()),
         IsLocalToUnit(N->isLocalToUnit()), IsDefinition(N->isDefinition()),
         StaticDataMemberDeclaration(N->getRawStaticDataMemberDeclaration()),
-        TemplateParams(N->getRawTemplateParams()),
+        TemplateParams(N->getRawTemplateParams()), Flags(N->getFlags()),
         AlignInBits(N->getAlignInBits()) {}
 
   bool isKeyOf(const DIGlobalVariable *RHS) const {
@@ -1037,6 +1039,7 @@ template <> struct MDNodeKeyImpl<DIGlobalVariable> {
            StaticDataMemberDeclaration ==
                RHS->getRawStaticDataMemberDeclaration() &&
            TemplateParams == RHS->getRawTemplateParams() &&
+           Flags == RHS->getFlags() &&
            AlignInBits == RHS->getAlignInBits();
   }
 
@@ -1050,7 +1053,7 @@ template <> struct MDNodeKeyImpl<DIGlobalVariable> {
     // TODO: make hashing work fine with such situations
     return hash_combine(Scope, Name, LinkageName, File, Line, Type,
                         IsLocalToUnit, IsDefinition, /* AlignInBits, */
-                        StaticDataMemberDeclaration);
+                        StaticDataMemberDeclaration, Flags);
   }
 };
 

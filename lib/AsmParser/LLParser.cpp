@@ -4714,7 +4714,7 @@ bool LLParser::ParseDICommonBlock(MDNode *&Result, bool IsDistinct) {
   REQUIRED(scope, MDField, );                                                  \
   OPTIONAL(declaration, MDField, );                                            \
   OPTIONAL(name, MDStringField, );                                             \
-  OPTIONAL(file, MDField, );					       \
+  OPTIONAL(file, MDField, );					               \
   OPTIONAL(line, LineField, );						       \
   OPTIONAL(align, MDUnsignedField, (0, UINT32_MAX));
   PARSE_MD_FIELDS();
@@ -4839,6 +4839,7 @@ bool LLParser::ParseDIGlobalVariable(MDNode *&Result, bool IsDistinct) {
   OPTIONAL(isDefinition, MDBoolField, (true));                                 \
   OPTIONAL(templateParams, MDField, );                                         \
   OPTIONAL(declaration, MDField, );                                            \
+  OPTIONAL(flags, DIFlagField, );                                              \
   OPTIONAL(align, MDUnsignedField, (0, UINT32_MAX));
   PARSE_MD_FIELDS();
 #undef VISIT_MD_FIELDS
@@ -4847,7 +4848,8 @@ bool LLParser::ParseDIGlobalVariable(MDNode *&Result, bool IsDistinct) {
       GET_OR_DISTINCT(DIGlobalVariable,
                       (Context, scope.Val, name.Val, linkageName.Val, file.Val,
                        line.Val, type.Val, isLocal.Val, isDefinition.Val,
-                       declaration.Val, templateParams.Val, align.Val));
+                       declaration.Val, templateParams.Val, flags.Val,
+                       align.Val));
   return false;
 }
 
