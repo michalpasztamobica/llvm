@@ -1033,36 +1033,47 @@ DIE *DwarfDebug::getSubrangeDie(const DIFortranSubrange *SR) const {
   return (I == SubrangeDieMap.end()) ? nullptr : I->second;
 }
 
-void DwarfDebug::constructSubrangeDie(
-    const DIFortranArrayType *AT,
-    SmallDenseMap<const DIVariable *, DbgVariable> &VarMap,
-    DwarfCompileUnit &TheCU) {
-  const dwarf::Attribute UpperAttr = dwarf::DW_AT_upper_bound;
-  const dwarf::Attribute LowerAttr = dwarf::DW_AT_lower_bound;
+void DwarfDebug::constructSubrangeDie(const DIFortranArrayType *AT,
+                                      DbgVariable &DV,
+                                      DwarfCompileUnit &TheCU) {
+  const DIFortranSubrange *WFS = nullptr;
+  DIExpression *WUEx = nullptr;
+  DIExpression *WLEx = nullptr;
+  const DIVariable *DI = DV.getVariable();
   DINodeArray Elements = AT->getElements();
 
   for (unsigned i = 0, N = Elements.size(); i < N; ++i) {
     DINode *Element = cast<DINode>(Elements[i]);
     if (const DIFortranSubrange *FS = dyn_cast<DIFortranSubrange>(Element)) {
-      const DIVariable *LBV = FS->getLowerBound();
-      DIExpression *LWEx = LBV ? FS->getLowerBoundExp() : nullptr;
-      const DIVariable *UBV = FS->getUpperBound();
-      DIExpression *UWEx = UBV ? FS->getUpperBoundExp() : nullptr;
-      if (LWEx || UWEx) {
-        auto I = SubrangeDieMap.find(FS);
-        if (I == SubrangeDieMap.end()) {
-          DIE *Die = DIE::get(DIEValueAllocator, dwarf::DW_TAG_subrange_type);
-          SubrangeDieMap[FS] = Die;
-          auto LIter = VarMap.find(LBV);
-          if (LWEx && (LIter != VarMap.end()))
-            TheCU.constructDieLocationAddExpr(
-                *Die, LowerAttr, LIter->second, LWEx);
-          auto UIter = VarMap.find(UBV);
-          if (UWEx && (UIter != VarMap.end()))
-            TheCU.constructDieLocationAddExpr(
-                *Die, UpperAttr, UIter->second, UWEx);
+      if (DIVariable *UBV = FS->getUpperBound())
+        if (UBV == DI) {
+          WFS = FS;
+          WUEx = FS->getUpperBoundExp();
         }
+      if (DIVariable *LBV = FS->getLowerBound())
+        if (LBV == DI) {
+          WFS = FS;
+          WLEx = FS->getLowerBoundExp();
+        }          
+    }
+    if (WFS) {
+      DIE *Die;
+      auto I = SubrangeDieMap.find(WFS);
+      if (I == SubrangeDieMap.end()) {
+        Die = DIE::get(DIEValueAllocator, dwarf::DW_TAG_subrange_type);
+        SubrangeDieMap[WFS] = Die;
+      } else {
+        Die = I->second;
       }
+
+      assert(Die);
+      if (WLEx)
+        TheCU.constructDieLocationAddExpr(
+            *Die, dwarf::DW_AT_lower_bound, DV, WLEx);
+      if (WUEx)
+        TheCU.constructDieLocationAddExpr(
+            *Die, dwarf::DW_AT_upper_bound, DV, WUEx);
+      WFS = nullptr;
     }
   }
 }
