@@ -175,7 +175,12 @@ DIE *DwarfCompileUnit::getOrCreateGlobalVariableDIE(
 }
 
 void DwarfCompileUnit::addLocationAttribute(
-    DIE *VariableDIE, const DIGlobalVariable *GV, ArrayRef<GlobalExpr> GlobalExprs) {
+  DIE *VariableDIE, const DIGlobalVariable *GV, ArrayRef<GlobalExpr> GlobalExprs) {
+  addLocationBlock(VariableDIE, dwarf::DW_AT_location, GV, GlobalExprs);
+}
+
+void DwarfCompileUnit::addLocationBlock(DIE *VariableDIE,
+  dwarf::Attribute Attribute, const DIGlobalVariable *GV, ArrayRef<GlobalExpr> GlobalExprs) {
   bool addToAccelTable = false;
   DIELoc *Loc = nullptr;
   std::unique_ptr<DIEDwarfExpression> DwarfExpr;
@@ -258,7 +263,7 @@ void DwarfCompileUnit::addLocationAttribute(
     DwarfExpr->addExpression(Expr);
   }
   if (Loc)
-    addBlock(*VariableDIE, dwarf::DW_AT_location, DwarfExpr->finalize());
+    addBlock(*VariableDIE, Attribute, DwarfExpr->finalize());
 
   if (DD->useAllLinkageNames())
     addLinkageName(*VariableDIE, GV->getLinkageName());
@@ -272,6 +277,13 @@ void DwarfCompileUnit::addLocationAttribute(
         DD->useAllLinkageNames())
       DD->addAccelName(*CUNode, GV->getLinkageName(), *VariableDIE);
   }
+}
+
+ArrayRef<DwarfCompileUnit::GlobalExpr>
+DwarfCompileUnit::findGlobalExprList(DIGlobalVariable *GV) {
+  if (globalVarMap)
+    return (*globalVarMap)[GV];
+  return SmallVector<GlobalExpr, 1>();
 }
 
 DIE *DwarfCompileUnit::getOrCreateCommonBlock(

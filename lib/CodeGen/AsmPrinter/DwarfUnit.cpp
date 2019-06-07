@@ -1333,12 +1333,34 @@ void DwarfUnit::constructFortranSubrangeDIE(DIE &Buffer,
   DIE &DW_Subrange = Buffer.addChild(Die);
   addDIEEntry(DW_Subrange, dwarf::DW_AT_type, *IndexTy);
 
-  if (!SR->getLowerBound()) {
+  if (DIVariable *GV = SR->getLowerBound()) {
+    if (DIGlobalVariable *GVar = dyn_cast<DIGlobalVariable>(GV)) {
+      ArrayRef<DwarfCompileUnit::GlobalExpr> GEL = getCU().findGlobalExprList(GVar);
+      if (GEL.size() >= 1) {
+        DwarfCompileUnit::GlobalExpr GE = {GEL.front().Var, SR->getLowerBoundExp()};
+        SmallVector<DwarfCompileUnit::GlobalExpr, 1> GEV;
+        GEV.emplace_back(GE);
+        getCU().addLocationBlock(Die, dwarf::DW_AT_lower_bound, GVar, GEV);
+      }
+    }
+  } else {
     int64_t BVC = SR->getCLowerBound();
     addSInt(DW_Subrange, dwarf::DW_AT_lower_bound, dwarf::DW_FORM_sdata, BVC);
   }
 
-  if ((!SR->getUpperBound()) && (!SR->noUpperBound())) {
+  if (SR->noUpperBound()) {
+    // do nothing
+  } else if (DIVariable *GV = SR->getUpperBound()) {
+    if (DIGlobalVariable *GVar = dyn_cast<DIGlobalVariable>(GV)) {
+      ArrayRef<DwarfCompileUnit::GlobalExpr> GEL = getCU().findGlobalExprList(GVar);
+      if (GEL.size() >= 1) {
+        DwarfCompileUnit::GlobalExpr GE = {GEL.front().Var, SR->getUpperBoundExp()};
+        SmallVector<DwarfCompileUnit::GlobalExpr, 1> GEV;
+        GEV.emplace_back(GE);
+        getCU().addLocationBlock(Die, dwarf::DW_AT_upper_bound, GVar, GEV);
+      }
+    }
+  } else {
     int64_t BVC = SR->getCUpperBound();
     addSInt(DW_Subrange, dwarf::DW_AT_upper_bound, dwarf::DW_FORM_sdata, BVC);
   }

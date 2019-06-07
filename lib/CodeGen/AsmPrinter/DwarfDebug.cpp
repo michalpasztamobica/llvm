@@ -779,11 +779,13 @@ void DwarfDebug::beginModule() {
         GVMapEntry.push_back({nullptr, Expr});
     }
     DenseSet<DIGlobalVariable *> Processed;
+    CU.setGlobalVarMap(&GVMap);
     for (auto *GVE : CUNode->getGlobalVariables()) {
       DIGlobalVariable *GV = GVE->getVariable();
       if (Processed.insert(GV).second)
         CU.getOrCreateGlobalVariableDIE(GV, sortGlobalExprs(GVMap[GV]));
     }
+    CU.setGlobalVarMap();
 
     for (auto *Ty : CUNode->getEnumTypes()) {
       // The enum types array by design contains pointers to
