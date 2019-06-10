@@ -579,6 +579,9 @@ class DwarfDebug : public DebugHandlerBase {
   /// Emit the reference to the section.
   void emitSectionReference(const DwarfCompileUnit &CU);
 
+  /// Populate dependent type variable map
+  void populateDependentTypeMap();
+
   /// Clear dependent type tracking map
   void clearDependentTracking() { VariableInDependentType.clear(); }
 
@@ -743,8 +746,7 @@ public:
 
   DIE *getSubrangeDie(const DIFortranSubrange *SR) const;
   void constructSubrangeDie(const DIFortranArrayType *AT,
-                            SmallDenseMap<const DIVariable *, DbgVariable> &DV,
-                            DwarfCompileUnit &TheCU);
+                            DbgVariable &DV, DwarfCompileUnit &TheCU);
 
   /// \defgroup DebuggerTuning Predicates to tune DWARF for a given debugger.
   ///

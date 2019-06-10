@@ -1083,11 +1083,7 @@ void DwarfDebug::constructSubrangeDie(const DIFortranArrayType *AT,
 // Collect variable information from side table maintained by MF.
 void DwarfDebug::collectVariableInfoFromMFTable(
     DwarfCompileUnit &TheCU, DenseSet<InlinedEntity> &Processed) {
-  clearDependentTracking();
   SmallDenseMap<InlinedEntity, DbgVariable *> MFVars;
-  SmallDenseMap<const DIVariable*, DbgVariable> VarMap;
-  std::list<const DIFortranArrayType *> worklist;
-
   for (const auto &VI : Asm->MF->getVariableDbgInfo()) {
     if (!VI.Var)
       continue;
@@ -1106,33 +1102,11 @@ void DwarfDebug::collectVariableInfoFromMFTable(
     auto RegVar = llvm::make_unique<DbgVariable>(
                     cast<DILocalVariable>(Var.first), Var.second);
     RegVar->initializeMMI(VI.Expr, VI.Slot);
-    VarMap.insert({VI.Var, *RegVar.get()});
-    Metadata *TypeMD = VI.Var->getType();
-    if (const DIStringType *ST = dyn_cast<DIStringType>(TypeMD))
-      if (const DIVariable *LV = ST->getStringLength())
-        VariableInDependentType[LV] = ST;
-    const DIFortranArrayType *AT = dyn_cast<DIFortranArrayType>(TypeMD);
-    if (!AT)
-      if (const DIDerivedType *DT = dyn_cast<DIDerivedType>(TypeMD))
-        if (DT->getTag() == dwarf::DW_TAG_pointer_type)
-          AT = dyn_cast<DIFortranArrayType>(DT->getBaseType());
-    if (AT)
-      for (const DINode *S : AT->getElements()) {
-        if (const DIFortranSubrange *FS = dyn_cast<DIFortranSubrange>(S)) {
-          bool AddToWorklist = false;
-          if (const DIVariable *LBV = FS->getLowerBound()) {
-            AddToWorklist = true;
-            VariableInDependentType[LBV] = AT;
-          }
-          if (const DIVariable *UBV = FS->getUpperBound()) {
-            AddToWorklist = true;
-            VariableInDependentType[UBV] = AT;
-          }
-          if (AddToWorklist)
-            worklist.push_back(AT);
-        }
-      }
-
+    if (VariableInDependentType.count(VI.Var)) {
+      const DIType *DT = VariableInDependentType[VI.Var];
+      if (const DIFortranArrayType *AT = dyn_cast<DIFortranArrayType>(DT))
+        constructSubrangeDie(AT, *RegVar.get(), TheCU);
+    } 
     if (DbgVariable *DbgVar = MFVars.lookup(Var))
       DbgVar->addMMIEntry(*RegVar);
     else if (InfoHolder.addScopeVariable(Scope, RegVar.get())) {
@@ -1140,9 +1114,6 @@ void DwarfDebug::collectVariableInfoFromMFTable(
       ConcreteEntities.push_back(std::move(RegVar));
     }
   }
-  if (!worklist.empty())
-    for (const DIFortranArrayType *AT : worklist)
-      constructSubrangeDie(AT, VarMap, TheCU);
 }
 
 // Get .debug_loc entry for the instruction range starting at MI.
@@ -1397,11 +1368,36 @@ static bool validThroughout(LexicalScopes &LScopes,
   return false;
 }
 
+void DwarfDebug::populateDependentTypeMap() {
+  for (const auto &I : DbgValues) {
+    InlinedEntity IV = I.first;
+    if (I.second.empty())
+      continue;
+    if (const DIVariable *DIV = dyn_cast<DIVariable>(IV.first)) {
+      if (const DIStringType *ST = dyn_cast<DIStringType>(
+              static_cast<const Metadata *>(DIV->getType())))
+        if (const DIVariable *LV = ST->getStringLength())
+          VariableInDependentType[LV] = ST;
+
+      if (const DIFortranArrayType *AT = dyn_cast<DIFortranArrayType>(
+              static_cast<const Metadata *>(DIV->getType())))
+        for (const DINode *S : AT->getElements())
+          if (const DIFortranSubrange *FS = dyn_cast<DIFortranSubrange>(S)) {
+            if (const DIVariable *LBV = FS->getLowerBound())
+              VariableInDependentType[LBV] = AT;
+            if (const DIVariable *UBV = FS->getUpperBound())
+              VariableInDependentType[UBV] = AT;
+        }
+    }
+  }
+}
+
 // Find variables for each lexical scope.
 void DwarfDebug::collectEntityInfo(DwarfCompileUnit &TheCU,
                                    const DISubprogram *SP,
                                    DenseSet<InlinedEntity> &Processed) {
   clearDependentTracking();
+  populateDependentTypeMap();
   // Grab the variable info that was squirreled away in the MMI side-table.
   collectVariableInfoFromMFTable(TheCU, Processed);
 
