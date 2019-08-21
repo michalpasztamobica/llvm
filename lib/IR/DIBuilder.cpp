@@ -264,6 +264,12 @@ DIBasicType *DIBuilder::createBasicType(StringRef Name, uint64_t SizeInBits,
                           0, Encoding, Flags);
 }
 
+DIStringType *DIBuilder::createStringType(StringRef Name, uint64_t SizeInBits) {
+  assert(!Name.empty() && "Unable to create type without name");
+  return DIStringType::get(VMContext, dwarf::DW_TAG_string_type, Name,
+                           SizeInBits, 0);
+}
+
 DIDerivedType *DIBuilder::createQualifiedType(unsigned Tag, DIType *FromTy) {
   return DIDerivedType::get(VMContext, Tag, "", nullptr, 0, nullptr, FromTy, 0,
                             0, 0, None, DINode::FlagZero);
@@ -524,6 +530,15 @@ DICompositeType *DIBuilder::createArrayType(uint64_t Size,
   return R;
 }
 
+DIFortranArrayType *DIBuilder::createFortranArrayType(
+    uint64_t Size, uint32_t AlignInBits, DIType *Ty, DINodeArray Subscripts) {
+  auto *R = DIFortranArrayType::get(VMContext, dwarf::DW_TAG_array_type, "",
+                                    nullptr, 0, nullptr, Ty, Size, AlignInBits,
+                                    0, DINode::FlagZero, Subscripts);
+  trackIfUnresolved(R);
+  return R;
+}
+
 DICompositeType *DIBuilder::createVectorType(uint64_t Size,
                                              uint32_t AlignInBits, DIType *Ty,
                                              DINodeArray Subscripts) {
@@ -627,6 +642,12 @@ DISubrange *DIBuilder::getOrCreateSubrange(int64_t Lo, Metadata *CountNode) {
   return DISubrange::get(VMContext, CountNode, Lo);
 }
 
+DIFortranSubrange *DIBuilder::getOrCreateFortranSubrange(
+    int64_t CLB, int64_t CUB, bool NUB, Metadata *LB, Metadata *LBE,
+    Metadata *UB, Metadata *UBE) {
+  return DIFortranSubrange::get(VMContext, CLB, CUB, NUB, LB, LBE, UB, UBE);
+}
+
 static void checkGlobalVariableScope(DIScope *Context) {
 #ifndef NDEBUG
   if (auto *CT =
@@ -639,13 +660,14 @@ static void checkGlobalVariableScope(DIScope *Context) {
 DIGlobalVariableExpression *DIBuilder::createGlobalVariableExpression(
     DIScope *Context, StringRef Name, StringRef LinkageName, DIFile *F,
     unsigned LineNumber, DIType *Ty, bool isLocalToUnit, DIExpression *Expr,
-    MDNode *Decl, MDTuple *templateParams, uint32_t AlignInBits) {
+    MDNode *Decl, MDTuple *templateParams, DINode::DIFlags Flags,
+    uint32_t AlignInBits) {
   checkGlobalVariableScope(Context);
 
   auto *GV = DIGlobalVariable::getDistinct(
       VMContext, cast_or_null<DIScope>(Context), Name, LinkageName, F,
       LineNumber, Ty, isLocalToUnit, true, cast_or_null<DIDerivedType>(Decl),
-      templateParams, AlignInBits);
+      templateParams, Flags, AlignInBits);
   if (!Expr)
     Expr = createExpression();
   auto *N = DIGlobalVariableExpression::get(VMContext, GV, Expr);
@@ -656,13 +678,14 @@ DIGlobalVariableExpression *DIBuilder::createGlobalVariableExpression(
 DIGlobalVariable *DIBuilder::createTempGlobalVariableFwdDecl(
     DIScope *Context, StringRef Name, StringRef LinkageName, DIFile *F,
     unsigned LineNumber, DIType *Ty, bool isLocalToUnit, MDNode *Decl,
-    MDTuple *templateParams, uint32_t AlignInBits) {
+    MDTuple *templateParams, DINode::DIFlags Flags, uint32_t AlignInBits) {
   checkGlobalVariableScope(Context);
 
   return DIGlobalVariable::getTemporary(
              VMContext, cast_or_null<DIScope>(Context), Name, LinkageName, F,
              LineNumber, Ty, isLocalToUnit, false,
-             cast_or_null<DIDerivedType>(Decl), templateParams, AlignInBits)
+             cast_or_null<DIDerivedType>(Decl), templateParams, Flags,
+             AlignInBits)
       .release();
 }
 
