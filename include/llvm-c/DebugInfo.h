@@ -160,6 +160,9 @@ enum {
   LLVMDIImportedEntityMetadataKind,
   LLVMDIMacroMetadataKind,
   LLVMDIMacroFileMetadataKind,
+  LLVMDIStringTypeMetadataKind,
+  LLVMDIFortranArrayTypeMetadataKind,
+  LLVMDIFortranSubrangeMetadataKind,
   LLVMDICommonBlockMetadataKind
 };
 typedef unsigned LLVMMetadataKind;
@@ -1071,7 +1074,8 @@ LLVMMetadataRef LLVMDIBuilderCreateGlobalVariableExpression(
     LLVMDIBuilderRef Builder, LLVMMetadataRef Scope, const char *Name,
     size_t NameLen, const char *Linkage, size_t LinkLen, LLVMMetadataRef File,
     unsigned LineNo, LLVMMetadataRef Ty, LLVMBool LocalToUnit,
-    LLVMMetadataRef Expr, LLVMMetadataRef Decl, uint32_t AlignInBits);
+    LLVMMetadataRef Expr, LLVMMetadataRef Decl, LLVMDIFlags Flags,
+    uint32_t AlignInBits);
 
 /**
  * Retrieves the \c DIVariable associated with this global variable expression.
@@ -1163,7 +1167,7 @@ LLVMMetadataRef LLVMDIBuilderCreateTempGlobalVariableFwdDecl(
     LLVMDIBuilderRef Builder, LLVMMetadataRef Scope, const char *Name,
     size_t NameLen, const char *Linkage, size_t LnkLen, LLVMMetadataRef File,
     unsigned LineNo, LLVMMetadataRef Ty, LLVMBool LocalToUnit,
-    LLVMMetadataRef Decl, uint32_t AlignInBits);
+    LLVMMetadataRef Decl, LLVMDIFlags Flags, uint32_t AlignInBits);
 
 /**
  * Insert a new llvm.dbg.declare intrinsic call before the given instruction.
