@@ -17,7 +17,6 @@
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/CodeGen/TargetLowering.h"
-#include "llvm/Target/TargetOptions.h"
 
 namespace llvm {
   class X86Subtarget;
@@ -105,8 +104,7 @@ namespace llvm {
 
       /// X86 conditional moves. Operand 0 and operand 1 are the two values
       /// to select from. Operand 2 is the condition code, and operand 3 is the
-      /// flag operand produced by a CMP or TEST instruction. It also writes a
-      /// flag result.
+      /// flag operand produced by a CMP or TEST instruction.
       CMOV,
 
       /// X86 conditional branches. Operand 0 is the chain operand, operand 1
@@ -144,6 +142,10 @@ namespace llvm {
       /// Special wrapper used under X86-64 PIC mode for RIP
       /// relative displacements.
       WrapperRIP,
+
+      /// Copies a 64-bit value from an MMX vector to the low word
+      /// of an XMM vector, with the high word zero filled.
+      MOVQ2DQ,
 
       /// Copies a 64-bit value from the low word of an XMM vector
       /// to an MMX vector.
@@ -509,6 +511,19 @@ namespace llvm {
       MCVTP2SI, MCVTP2UI, MCVTTP2SI, MCVTTP2UI,
       MCVTSI2P, MCVTUI2P,
 
+      // Vector float to bfloat16.
+      // Convert TWO packed single data to one packed BF16 data
+      CVTNE2PS2BF16, 
+      // Convert packed single data to packed BF16 data
+      CVTNEPS2BF16,
+      // Masked version of above.
+      // SRC, PASSTHRU, MASK
+      MCVTNEPS2BF16,
+
+      // Dot product of BF16 pairs to accumulated into
+      // packed single precision.
+      DPBF16PS,
+
       // Save xmm argument registers to the stack, according to %al. An operator
       // is needed so that this can be expanded with control flow.
       VASTART_SAVE_XMM_REGS,
@@ -537,6 +552,12 @@ namespace llvm {
       // Get a NIST SP800-90B & C compliant random integer and
       // indicate whether it is valid in CF.
       RDSEED,
+
+      // Protection keys
+      // RDPKRU - Operand 0 is chain. Operand 1 is value for ECX.
+      // WRPKRU - Operand 0 is chain. Operand 1 is value for EDX. Operand 2 is
+      // value for ECX.
+      RDPKRU, WRPKRU,
 
       // SSE42 string comparisons.
       // These nodes produce 3 results, index, mask, and flags. X86ISelDAGToDAG
@@ -570,6 +591,12 @@ namespace llvm {
       // User level wait
       UMWAIT, TPAUSE,
 
+      // Enqueue Stores Instructions
+      ENQCMD, ENQCMDS,
+
+      // For avx512-vp2intersect
+      VP2INTERSECT,
+
       // Compare and swap.
       LCMPXCHG_DAG = ISD::FIRST_TARGET_MEMORY_OPCODE,
       LCMPXCHG8_DAG,
@@ -583,6 +610,9 @@ namespace llvm {
 
       // Load, scalar_to_vector, and zero extend.
       VZEXT_LOAD,
+
+      // extract_vector_elt, store.
+      VEXTRACT_STORE,
 
       // Store FP control world into i16 memory.
       FNSTCW16m,
@@ -602,16 +632,22 @@ namespace llvm {
       FILD,
       FILD_FLAG,
 
+      /// This instruction implements a fp->int store from FP stack
+      /// slots. This corresponds to the fist instruction. It takes a
+      /// chain operand, value to store, address, and glue. The memory VT
+      /// specifies the type to store as.
+      FIST,
+
       /// This instruction implements an extending load to FP stack slots.
       /// This corresponds to the X86::FLD32m / X86::FLD64m. It takes a chain
       /// operand, and ptr to load from. The memory VT specifies the type to
       /// load from.
       FLD,
 
-      /// This instruction implements a truncating store to FP stack
+      /// This instruction implements a truncating store from FP stack
       /// slots. This corresponds to the X86::FST32m / X86::FST64m. It takes a
-      /// chain operand, value to store, and address. The memory VT specifies
-      /// the type to store as.
+      /// chain operand, value to store, address, and glue. The memory VT
+      /// specifies the type to store as.
       FST,
 
       /// This instruction grabs the address of the next argument
@@ -647,6 +683,9 @@ namespace llvm {
     bool isCalleePop(CallingConv::ID CallingConv,
                      bool is64Bit, bool IsVarArg, bool GuaranteeTCO);
 
+    /// If Op is a constant whose elements are all the same constant or
+    /// undefined, return true and return the constant value in \p SplatVal.
+    bool isConstantSplat(SDValue Op, APInt &SplatVal);
   } // end namespace X86
 
   //===--------------------------------------------------------------------===//
@@ -698,7 +737,7 @@ namespace llvm {
     /// target-independent logic.
     EVT getOptimalMemOpType(uint64_t Size, unsigned DstAlign, unsigned SrcAlign,
                             bool IsMemset, bool ZeroMemset, bool MemcpyStrSrc,
-                            MachineFunction &MF) const override;
+                            const AttributeList &FuncAttributes) const override;
 
     /// Returns true if it's safe to use load / store of the
     /// specified type to expand memcpy / memset inline. This is mostly true
@@ -711,7 +750,8 @@ namespace llvm {
     /// Returns true if the target allows unaligned memory accesses of the
     /// specified type. Returns whether it is "fast" in the last argument.
     bool allowsMisalignedMemoryAccesses(EVT VT, unsigned AS, unsigned Align,
-                                       bool *Fast) const override;
+                                        MachineMemOperand::Flags Flags,
+                                        bool *Fast) const override;
 
     /// Provide custom lowering hooks for some operations.
     ///
@@ -765,7 +805,11 @@ namespace llvm {
     /// This method returns the name of a target specific DAG node.
     const char *getTargetNodeName(unsigned Opcode) const override;
 
-    bool mergeStoresAfterLegalization() const override { return true; }
+    /// Do not merge vector stores after legalization because that may conflict
+    /// with x86-specific store splitting optimizations.
+    bool mergeStoresAfterLegalization(EVT MemVT) const override {
+      return !MemVT.isVector();
+    }
 
     bool canMergeStoresTo(unsigned AddressSpace, EVT MemVT,
                           const SelectionDAG &DAG) const override;
@@ -802,7 +846,17 @@ namespace llvm {
 
     bool hasAndNot(SDValue Y) const override;
 
-    bool preferShiftsToClearExtremeBits(SDValue Y) const override;
+    bool hasBitTest(SDValue X, SDValue Y) const override;
+
+    bool shouldProduceAndByConstByHoistingConstFromShiftsLHSOfAnd(
+        SDValue X, ConstantSDNode *XC, ConstantSDNode *CC, SDValue Y,
+        unsigned OldShiftOpcode, unsigned NewShiftOpcode,
+        SelectionDAG &DAG) const override;
+
+    bool shouldFoldConstantShiftPairToMask(const SDNode *N,
+                                           CombineLevel Level) const override;
+
+    bool shouldFoldMaskToVariableShiftPair(SDValue Y) const override;
 
     bool
     shouldTransformSignedTruncationCheck(EVT XVT,
@@ -822,11 +876,7 @@ namespace llvm {
       return VTIsOk(XVT) && VTIsOk(KeptBitsVT);
     }
 
-    bool shouldExpandShift(SelectionDAG &DAG, SDNode *N) const override {
-      if (DAG.getMachineFunction().getFunction().optForMinSize())
-        return false;
-      return true;
-    }
+    bool shouldExpandShift(SelectionDAG &DAG, SDNode *N) const override;
 
     bool shouldSplatInsEltVarIndex(EVT VT) const override;
 
@@ -836,11 +886,6 @@ namespace llvm {
 
     /// Vector-sized comparisons are fast using PCMPEQ + PMOVMSK or PTEST.
     MVT hasFastEqualityCompare(unsigned NumBits) const override;
-
-    /// Allow multiple load pairs per block for smaller and faster code.
-    unsigned getMemcmpEqZeroLoadsPerBlock() const override {
-      return 2;
-    }
 
     /// Return the value type to use for ISD::SETCC.
     EVT getSetCCResultType(const DataLayout &DL, LLVMContext &Context,
@@ -876,6 +921,12 @@ namespace llvm {
                                            KnownBits &Known,
                                            TargetLoweringOpt &TLO,
                                            unsigned Depth) const override;
+
+    SDValue SimplifyMultipleUseDemandedBitsForTargetNode(
+        SDValue Op, const APInt &DemandedBits, const APInt &DemandedElts,
+        SelectionDAG &DAG, unsigned Depth) const override;
+
+    const Constant *getTargetConstantFromLoad(LoadSDNode *LD) const override;
 
     SDValue unwrapAddress(SDValue N) const override;
 
@@ -956,6 +1007,12 @@ namespace llvm {
                              unsigned AS) const override;
 
     bool isVectorShiftByScalarCheap(Type *Ty) const override;
+
+    /// Add x86-specific opcodes to the default list.
+    bool isBinOp(unsigned Opcode) const override;
+
+    /// Returns true if the opcode is a commutative binary operation.
+    bool isCommutativeBinOp(unsigned Opcode) const override;
 
     /// Return true if it's free to truncate a value of
     /// type Ty1 to type Ty2. e.g. On x86 it's free to truncate a i32 value in
@@ -1050,7 +1107,8 @@ namespace llvm {
 
     bool convertSelectOfConstantsToMath(EVT VT) const override;
 
-    bool decomposeMulByConstant(EVT VT, SDValue C) const override;
+    bool decomposeMulByConstant(LLVMContext &Context, EVT VT,
+                                SDValue C) const override;
 
     bool shouldUseStrictFP_TO_INT(EVT FpVT, EVT IntVT,
                                   bool IsSigned) const override;
@@ -1065,6 +1123,12 @@ namespace llvm {
     /// supported.
     bool shouldScalarizeBinop(SDValue) const override;
 
+    /// Extract of a scalar FP value from index 0 of a vector is free.
+    bool isExtractVecEltCheap(EVT VT, unsigned Index) const override {
+      EVT EltVT = VT.getScalarType();
+      return (EltVT == MVT::f32 || EltVT == MVT::f64) && Index == 0;
+    }
+
     /// Overflow nodes should get combined/lowered to optimal instructions
     /// (they should allow eliminating explicit compares by getting flags from
     /// math ops).
@@ -1077,7 +1141,9 @@ namespace llvm {
       return NumElem > 2;
     }
 
-    bool isLoadBitCastBeneficial(EVT LoadVT, EVT BitcastVT) const override;
+    bool isLoadBitCastBeneficial(EVT LoadVT, EVT BitcastVT,
+                                 const SelectionDAG &DAG,
+                                 const MachineMemOperand &MMO) const override;
 
     /// Intel processors have a unified instruction and data cache
     const char * getClearCacheBuiltinName() const override {
@@ -1142,6 +1208,8 @@ namespace llvm {
     bool supportSwiftError() const override;
 
     StringRef getStackProbeSymbolName(MachineFunction &MF) const override;
+
+    unsigned getStackProbeSize(MachineFunction &MF) const;
 
     bool hasVectorBlend() const override { return true; }
 
@@ -1239,11 +1307,14 @@ namespace llvm {
                                   const unsigned char OpFlags = 0) const;
     SDValue LowerConstantPool(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerBlockAddress(SDValue Op, SelectionDAG &DAG) const;
-    SDValue LowerGlobalAddress(const GlobalValue *GV, const SDLoc &dl,
-                               int64_t Offset, SelectionDAG &DAG) const;
     SDValue LowerGlobalAddress(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerGlobalTLSAddress(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerExternalSymbol(SDValue Op, SelectionDAG &DAG) const;
+
+    /// Creates target global address or external symbol nodes for calls or
+    /// other uses.
+    SDValue LowerGlobalOrExternal(SDValue Op, SelectionDAG &DAG,
+                                  bool ForCall) const;
 
     SDValue LowerSINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerUINT_TO_FP(SDValue Op, SelectionDAG &DAG) const;
@@ -1271,6 +1342,12 @@ namespace llvm {
     SDValue LowerGC_TRANSITION_START(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerGC_TRANSITION_END(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerINTRINSIC_WO_CHAIN(SDValue Op, SelectionDAG &DAG) const;
+    SDValue lowerFaddFsub(SDValue Op, SelectionDAG &DAG) const;
+    SDValue LowerFP_EXTEND(SDValue Op, SelectionDAG &DAG) const;
+    SDValue LowerFP_ROUND(SDValue Op, SelectionDAG &DAG) const;
+
+    SDValue LowerF128Call(SDValue Op, SelectionDAG &DAG,
+                          RTLIB::Libcall Call) const;
 
     SDValue
     LowerFormalArguments(SDValue Chain, CallingConv::ID CallConv, bool isVarArg,
@@ -1316,6 +1393,9 @@ namespace llvm {
 
     LoadInst *
     lowerIdempotentRMWIntoFencedLoad(AtomicRMWInst *AI) const override;
+
+    bool lowerAtomicStoreAsStoreSDNode(const StoreInst &SI) const override;
+    bool lowerAtomicLoadAsLoadSDNode(const LoadInst &LI) const override;
 
     bool needsCmpXchgNb(Type *MemType) const;
 
@@ -1407,6 +1487,9 @@ namespace llvm {
 
     /// Reassociate floating point divisions into multiply by reciprocal.
     unsigned combineRepeatedFPDivisors() const override;
+
+    SDValue BuildSDIVPow2(SDNode *N, const APInt &Divisor, SelectionDAG &DAG,
+                          SmallVectorImpl<SDNode *> &Created) const override;
   };
 
   namespace X86 {
@@ -1573,10 +1656,10 @@ namespace llvm {
   void scaleShuffleMask(int Scale, ArrayRef<T> Mask,
                         SmallVectorImpl<T> &ScaledMask) {
     assert(0 < Scale && "Unexpected scaling factor");
-    int NumElts = Mask.size();
-    ScaledMask.assign(static_cast<size_t>(NumElts * Scale), -1);
+    size_t NumElts = Mask.size();
+    ScaledMask.assign(NumElts * Scale, -1);
 
-    for (int i = 0; i != NumElts; ++i) {
+    for (int i = 0; i != (int)NumElts; ++i) {
       int M = Mask[i];
 
       // Repeat sentinel values in every mask element.

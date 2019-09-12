@@ -32,11 +32,11 @@ define dso_local i32 @test() local_unnamed_addr #0 !dbg !21 {
 ; CHECK-NEXT:        .long   0                       # BTF_KIND_FUNC_PROTO(id = 1)
 ; CHECK-NEXT:        .long   218103808               # 0xd000000
 ; CHECK-NEXT:        .long   2
-; CHECK-NEXT:        .long   44                      # BTF_KIND_INT(id = 2)
+; CHECK-NEXT:        .long   1                       # BTF_KIND_INT(id = 2)
 ; CHECK-NEXT:        .long   16777216                # 0x1000000
 ; CHECK-NEXT:        .long   4
 ; CHECK-NEXT:        .long   16777248                # 0x1000020
-; CHECK-NEXT:        .long   48                      # BTF_KIND_FUNC(id = 3)
+; CHECK-NEXT:        .long   5                       # BTF_KIND_FUNC(id = 3)
 ; CHECK-NEXT:        .long   201326592               # 0xc000000
 ; CHECK-NEXT:        .long   1
 ; CHECK-NEXT:        .long   0                       # BTF_KIND_VOLATILE(id = 4)
@@ -52,22 +52,22 @@ define dso_local i32 @test() local_unnamed_addr #0 !dbg !21 {
 ; CHECK-NEXT:        .long   2
 ; CHECK-NEXT:        .long   32                      # 0x20
 ; CHECK-NEXT:        .long   59
-; CHECK-NEXT:        .long   6
-; CHECK-NEXT:        .long   64                      # 0x40
-; CHECK-NEXT:        .long   0                       # BTF_KIND_ARRAY(id = 6)
-; CHECK-NEXT:        .long   50331648                # 0x3000000
-; CHECK-NEXT:        .long   0
-; CHECK-NEXT:        .long   8
 ; CHECK-NEXT:        .long   7
-; CHECK-NEXT:        .long   0
-; CHECK-NEXT:        .long   61                      # BTF_KIND_INT(id = 7)
-; CHECK-NEXT:        .long   16777216                # 0x1000000
-; CHECK-NEXT:        .long   4
-; CHECK-NEXT:        .long   32                      # 0x20
-; CHECK-NEXT:        .long   81                      # BTF_KIND_INT(id = 8)
+; CHECK-NEXT:        .long   64                      # 0x40
+; CHECK-NEXT:        .long   61                      # BTF_KIND_INT(id = 6)
 ; CHECK-NEXT:        .long   16777216                # 0x1000000
 ; CHECK-NEXT:        .long   1
 ; CHECK-NEXT:        .long   16777224                # 0x1000008
+; CHECK-NEXT:        .long   0                       # BTF_KIND_ARRAY(id = 7)
+; CHECK-NEXT:        .long   50331648                # 0x3000000
+; CHECK-NEXT:        .long   0
+; CHECK-NEXT:        .long   6
+; CHECK-NEXT:        .long   8
+; CHECK-NEXT:        .long   0
+; CHECK-NEXT:        .long   66                      # BTF_KIND_INT(id = 8)
+; CHECK-NEXT:        .long   16777216                # 0x1000000
+; CHECK-NEXT:        .long   4
+; CHECK-NEXT:        .long   32                      # 0x20
 ; CHECK-NEXT:        .long   86                      # BTF_KIND_VAR(id = 9)
 ; CHECK-NEXT:        .long   234881024               # 0xe000000
 ; CHECK-NEXT:        .long   4
@@ -79,13 +79,13 @@ define dso_local i32 @test() local_unnamed_addr #0 !dbg !21 {
 ; CHECK-NEXT:        .long   sv
 ; CHECK-NEXT:        .long   20
 ; CHECK-NEXT:        .byte   0                       # string offset=0
-; CHECK-NEXT:        .ascii  ".text"                 # string offset=1
+; CHECK-NEXT:        .ascii  "int"                   # string offset=1
 ; CHECK-NEXT:        .byte   0
-; CHECK-NEXT:        .ascii  "/home/yhs/work/tests/llvm/bug/test.c" # string offset=7
+; CHECK-NEXT:        .ascii  "test"                  # string offset=5
 ; CHECK-NEXT:        .byte   0
-; CHECK-NEXT:        .ascii  "int"                   # string offset=44
+; CHECK-NEXT:        .ascii  ".text"                 # string offset=10
 ; CHECK-NEXT:        .byte   0
-; CHECK-NEXT:        .ascii  "test"                  # string offset=48
+; CHECK-NEXT:        .ascii  "/home/yhs/work/tests/llvm/bug/test.c" # string offset=16
 ; CHECK-NEXT:        .byte   0
 ; CHECK-NEXT:        .byte   116                     # string offset=53
 ; CHECK-NEXT:        .byte   0
@@ -95,9 +95,9 @@ define dso_local i32 @test() local_unnamed_addr #0 !dbg !21 {
 ; CHECK-NEXT:        .byte   0
 ; CHECK-NEXT:        .byte   99                      # string offset=59
 ; CHECK-NEXT:        .byte   0
-; CHECK-NEXT:        .ascii  "__ARRAY_SIZE_TYPE__"   # string offset=61
+; CHECK-NEXT:        .ascii  "char"                  # string offset=61
 ; CHECK-NEXT:        .byte   0
-; CHECK-NEXT:        .ascii  "char"                  # string offset=81
+; CHECK-NEXT:        .ascii  "__ARRAY_SIZE_TYPE__"   # string offset=66
 ; CHECK-NEXT:        .byte   0
 ; CHECK-NEXT:        .ascii  "sv"                    # string offset=86
 ; CHECK-NEXT:        .byte   0

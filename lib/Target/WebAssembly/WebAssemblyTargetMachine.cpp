@@ -13,6 +13,7 @@
 
 #include "WebAssemblyTargetMachine.h"
 #include "MCTargetDesc/WebAssemblyMCTargetDesc.h"
+#include "TargetInfo/WebAssemblyTargetInfo.h"
 #include "WebAssembly.h"
 #include "WebAssemblyMachineFunctionInfo.h"
 #include "WebAssemblyTargetObjectFile.h"
@@ -26,6 +27,7 @@
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/LowerAtomic.h"
 #include "llvm/Transforms/Utils.h"
 using namespace llvm;
 
@@ -65,12 +67,12 @@ extern "C" void LLVMInitializeWebAssemblyTarget() {
   initializeWebAssemblyMemIntrinsicResultsPass(PR);
   initializeWebAssemblyRegStackifyPass(PR);
   initializeWebAssemblyRegColoringPass(PR);
-  initializeWebAssemblyExplicitLocalsPass(PR);
   initializeWebAssemblyFixIrreducibleControlFlowPass(PR);
   initializeWebAssemblyLateEHPreparePass(PR);
   initializeWebAssemblyExceptionInfoPass(PR);
   initializeWebAssemblyCFGSortPass(PR);
   initializeWebAssemblyCFGStackifyPass(PR);
+  initializeWebAssemblyExplicitLocalsPass(PR);
   initializeWebAssemblyLowerBrUnlessPass(PR);
   initializeWebAssemblyRegNumberingPass(PR);
   initializeWebAssemblyPeepholePass(PR);
@@ -81,13 +83,22 @@ extern "C" void LLVMInitializeWebAssemblyTarget() {
 // WebAssembly Lowering public interface.
 //===----------------------------------------------------------------------===//
 
-static Reloc::Model getEffectiveRelocModel(Optional<Reloc::Model> RM) {
+static Reloc::Model getEffectiveRelocModel(Optional<Reloc::Model> RM,
+                                           const Triple &TT) {
   if (!RM.hasValue()) {
     // Default to static relocation model.  This should always be more optimial
     // than PIC since the static linker can determine all global addresses and
     // assume direct function calls.
     return Reloc::Static;
   }
+
+  if (!TT.isOSEmscripten()) {
+    // Relocation modes other than static are currently implemented in a way
+    // that only works for Emscripten, so disable them if we aren't targeting
+    // Emscripten.
+    return Reloc::Static;
+  }
+
   return *RM;
 }
 
@@ -100,7 +111,7 @@ WebAssemblyTargetMachine::WebAssemblyTargetMachine(
     : LLVMTargetMachine(T,
                         TT.isArch64Bit() ? "e-m:e-p:64:64-i64:64-n32:64-S128"
                                          : "e-m:e-p:32:32-i64:64-n32:64-S128",
-                        TT, CPU, FS, Options, getEffectiveRelocModel(RM),
+                        TT, CPU, FS, Options, getEffectiveRelocModel(RM, TT),
                         getEffectiveCodeModel(CM, CodeModel::Large), OL),
       TLOF(new WebAssemblyTargetObjectFile()) {
   // WebAssembly type-checks instructions, but a noreturn function with a return
@@ -117,10 +128,6 @@ WebAssemblyTargetMachine::WebAssemblyTargetMachine(
 
   initAsmInfo();
 
-  // Create a subtarget using the unmodified target machine features to
-  // initialize the used feature set with explicitly enabled features.
-  getSubtargetImpl(getTargetCPU(), getTargetFeatureString());
-
   // Note that we don't use setRequiresStructuredCFG(true). It disables
   // optimizations than we're ok with, and want, such as critical edge
   // splitting and tail merging.
@@ -133,8 +140,7 @@ WebAssemblyTargetMachine::getSubtargetImpl(std::string CPU,
                                            std::string FS) const {
   auto &I = SubtargetMap[CPU + FS];
   if (!I) {
-    I = llvm::make_unique<WebAssemblySubtarget>(TargetTriple, CPU, FS, *this);
-    UsedFeatures |= I->getFeatureBits();
+    I = std::make_unique<WebAssemblySubtarget>(TargetTriple, CPU, FS, *this);
   }
   return I.get();
 }
@@ -160,21 +166,132 @@ WebAssemblyTargetMachine::getSubtargetImpl(const Function &F) const {
 }
 
 namespace {
-class StripThreadLocal final : public ModulePass {
-  // The default thread model for wasm is single, where thread-local variables
-  // are identical to regular globals and should be treated the same. So this
-  // pass just converts all GlobalVariables to NotThreadLocal
+
+class CoalesceFeaturesAndStripAtomics final : public ModulePass {
+  // Take the union of all features used in the module and use it for each
+  // function individually, since having multiple feature sets in one module
+  // currently does not make sense for WebAssembly. If atomics are not enabled,
+  // also strip atomic operations and thread local storage.
   static char ID;
+  WebAssemblyTargetMachine *WasmTM;
 
 public:
-  StripThreadLocal() : ModulePass(ID) {}
+  CoalesceFeaturesAndStripAtomics(WebAssemblyTargetMachine *WasmTM)
+      : ModulePass(ID), WasmTM(WasmTM) {}
+
   bool runOnModule(Module &M) override {
-    for (auto &GV : M.globals())
-      GV.setThreadLocalMode(GlobalValue::ThreadLocalMode::NotThreadLocal);
+    FeatureBitset Features = coalesceFeatures(M);
+
+    std::string FeatureStr = getFeatureString(Features);
+    for (auto &F : M)
+      replaceFeatures(F, FeatureStr);
+
+    bool StrippedAtomics = false;
+    bool StrippedTLS = false;
+
+    if (!Features[WebAssembly::FeatureAtomics])
+      StrippedAtomics = stripAtomics(M);
+
+    if (!Features[WebAssembly::FeatureBulkMemory])
+      StrippedTLS = stripThreadLocals(M);
+
+    if (StrippedAtomics && !StrippedTLS)
+      stripThreadLocals(M);
+    else if (StrippedTLS && !StrippedAtomics)
+      stripAtomics(M);
+
+    recordFeatures(M, Features, StrippedAtomics || StrippedTLS);
+
+    // Conservatively assume we have made some change
     return true;
   }
+
+private:
+  FeatureBitset coalesceFeatures(const Module &M) {
+    FeatureBitset Features =
+        WasmTM
+            ->getSubtargetImpl(WasmTM->getTargetCPU(),
+                               WasmTM->getTargetFeatureString())
+            ->getFeatureBits();
+    for (auto &F : M)
+      Features |= WasmTM->getSubtargetImpl(F)->getFeatureBits();
+    return Features;
+  }
+
+  std::string getFeatureString(const FeatureBitset &Features) {
+    std::string Ret;
+    for (const SubtargetFeatureKV &KV : WebAssemblyFeatureKV) {
+      if (Features[KV.Value])
+        Ret += (StringRef("+") + KV.Key + ",").str();
+    }
+    return Ret;
+  }
+
+  void replaceFeatures(Function &F, const std::string &Features) {
+    F.removeFnAttr("target-features");
+    F.removeFnAttr("target-cpu");
+    F.addFnAttr("target-features", Features);
+  }
+
+  bool stripAtomics(Module &M) {
+    // Detect whether any atomics will be lowered, since there is no way to tell
+    // whether the LowerAtomic pass lowers e.g. stores.
+    bool Stripped = false;
+    for (auto &F : M) {
+      for (auto &B : F) {
+        for (auto &I : B) {
+          if (I.isAtomic()) {
+            Stripped = true;
+            goto done;
+          }
+        }
+      }
+    }
+
+  done:
+    if (!Stripped)
+      return false;
+
+    LowerAtomicPass Lowerer;
+    FunctionAnalysisManager FAM;
+    for (auto &F : M)
+      Lowerer.run(F, FAM);
+
+    return true;
+  }
+
+  bool stripThreadLocals(Module &M) {
+    bool Stripped = false;
+    for (auto &GV : M.globals()) {
+      if (GV.getThreadLocalMode() !=
+          GlobalValue::ThreadLocalMode::NotThreadLocal) {
+        Stripped = true;
+        GV.setThreadLocalMode(GlobalValue::ThreadLocalMode::NotThreadLocal);
+      }
+    }
+    return Stripped;
+  }
+
+  void recordFeatures(Module &M, const FeatureBitset &Features, bool Stripped) {
+    for (const SubtargetFeatureKV &KV : WebAssemblyFeatureKV) {
+      std::string MDKey = (StringRef("wasm-feature-") + KV.Key).str();
+      if (KV.Value == WebAssembly::FeatureAtomics && Stripped) {
+        // "atomics" is special: code compiled without atomics may have had its
+        // atomics lowered to nonatomic operations. In that case, atomics is
+        // disallowed to prevent unsafe linking with atomics-enabled objects.
+        assert(!Features[WebAssembly::FeatureAtomics] ||
+               !Features[WebAssembly::FeatureBulkMemory]);
+        M.addModuleFlag(Module::ModFlagBehavior::Error, MDKey,
+                        wasm::WASM_FEATURE_PREFIX_DISALLOWED);
+      } else if (Features[KV.Value]) {
+        // Otherwise features are marked Used or not mentioned
+        M.addModuleFlag(Module::ModFlagBehavior::Error, MDKey,
+                        wasm::WASM_FEATURE_PREFIX_USED);
+      }
+    }
+  }
 };
-char StripThreadLocal::ID = 0;
+char CoalesceFeaturesAndStripAtomics::ID = 0;
 
 /// WebAssembly Code Generator Pass Configuration Options.
 class WebAssemblyPassConfig final : public TargetPassConfig {
@@ -222,16 +339,11 @@ FunctionPass *WebAssemblyPassConfig::createTargetRegisterAllocator(bool) {
 //===----------------------------------------------------------------------===//
 
 void WebAssemblyPassConfig::addIRPasses() {
-  if (static_cast<WebAssemblyTargetMachine *>(TM)
-          ->getUsedFeatures()[WebAssembly::FeatureAtomics]) {
-    // Expand some atomic operations. WebAssemblyTargetLowering has hooks which
-    // control specifically what gets lowered.
-    addPass(createAtomicExpandPass());
-  } else {
-    // If atomics are not enabled, they get lowered to non-atomics.
-    addPass(createLowerAtomicPass());
-    addPass(new StripThreadLocal());
-  }
+  // Runs LowerAtomicPass if necessary
+  addPass(new CoalesceFeaturesAndStripAtomics(&getWebAssemblyTargetMachine()));
+
+  // This is a no-op if atomics are not used in the module
+  addPass(createAtomicExpandPass());
 
   // Add signatures to prototype-less function declarations
   addPass(createWebAssemblyAddMissingPrototypes());
@@ -264,6 +376,9 @@ void WebAssemblyPassConfig::addIRPasses() {
   if (EnableEmException || EnableEmSjLj)
     addPass(createWebAssemblyLowerEmscriptenEHSjLj(EnableEmException,
                                                    EnableEmSjLj));
+
+  // Expand indirectbr instructions to switches.
+  addPass(createIndirectBrExpandPass());
 
   TargetPassConfig::addIRPasses();
 }
@@ -349,15 +464,15 @@ void WebAssemblyPassConfig::addPreEmitPass() {
     addPass(createWebAssemblyRegColoring());
   }
 
-  // Insert explicit local.get and local.set operators.
-  addPass(createWebAssemblyExplicitLocals());
-
   // Sort the blocks of the CFG into topological order, a prerequisite for
   // BLOCK and LOOP markers.
   addPass(createWebAssemblyCFGSort());
 
   // Insert BLOCK and LOOP markers.
   addPass(createWebAssemblyCFGStackify());
+
+  // Insert explicit local.get and local.set operators.
+  addPass(createWebAssemblyExplicitLocals());
 
   // Lower br_unless into br_if.
   addPass(createWebAssemblyLowerBrUnless());

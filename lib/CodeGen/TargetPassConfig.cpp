@@ -22,6 +22,7 @@
 #include "llvm/Analysis/ScopedNoAliasAA.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Analysis/TypeBasedAliasAnalysis.h"
+#include "llvm/CodeGen/CSEConfigBase.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachinePassRegistry.h"
 #include "llvm/CodeGen/Passes.h"
@@ -48,9 +49,10 @@
 
 using namespace llvm;
 
-cl::opt<bool> EnableIPRA("enable-ipra", cl::init(false), cl::Hidden,
-                         cl::desc("Enable interprocedural register allocation "
-                                  "to reduce load/store at procedure calls."));
+static cl::opt<bool>
+    EnableIPRA("enable-ipra", cl::init(false), cl::Hidden,
+               cl::desc("Enable interprocedural register allocation "
+                        "to reduce load/store at procedure calls."));
 static cl::opt<bool> DisablePostRASched("disable-post-ra", cl::Hidden,
     cl::desc("Disable Post Regalloc Scheduler"));
 static cl::opt<bool> DisableBranchFold("disable-branch-fold", cl::Hidden,
@@ -151,8 +153,10 @@ static cl::opt<GlobalISelAbortMode> EnableGlobalISelAbort(
 // substitutePass(&PostRASchedulerID, &PostMachineSchedulerID).
 // Targets can return true in targetSchedulesPostRAScheduling() and
 // insert a PostRA scheduling pass wherever it wants.
-cl::opt<bool> MISchedPostRA("misched-postra", cl::Hidden,
-  cl::desc("Run MachineScheduler post regalloc (independent of preRA sched)"));
+static cl::opt<bool> MISchedPostRA(
+    "misched-postra", cl::Hidden,
+    cl::desc(
+        "Run MachineScheduler post regalloc (independent of preRA sched)"));
 
 // Experimental option to run live interval analysis early.
 static cl::opt<bool> EarlyLiveIntervals("early-live-intervals", cl::Hidden,
@@ -174,10 +178,10 @@ static cl::opt<CFLAAType> UseCFLAA(
 /// Option names for limiting the codegen pipeline.
 /// Those are used in error reporting and we didn't want
 /// to duplicate their names all over the place.
-const char *StartAfterOptName = "start-after";
-const char *StartBeforeOptName = "start-before";
-const char *StopAfterOptName = "stop-after";
-const char *StopBeforeOptName = "stop-before";
+static const char *StartAfterOptName = "start-after";
+static const char *StartBeforeOptName = "start-before";
+static const char *StopAfterOptName = "stop-after";
+static const char *StopBeforeOptName = "stop-before";
 
 static cl::opt<std::string>
     StartAfterOpt(StringRef(StartAfterOptName),
@@ -645,7 +649,7 @@ void TargetPassConfig::addIRPasses() {
     // into optimally-sized loads and compares. The transforms are enabled by a
     // target lowering hook.
     if (!DisableMergeICmps)
-      addPass(createMergeICmpsPass());
+      addPass(createMergeICmpsLegacyPass());
     addPass(createExpandMemCmpPass());
   }
 
@@ -814,6 +818,13 @@ bool TargetPassConfig::addCoreISelPasses() {
   } else if (addInstSelector())
     return true;
 
+  // Expand pseudo-instructions emitted by ISel. Don't run the verifier before
+  // FinalizeISel.
+  addPass(&FinalizeISelID);
+
+  // Print the instruction selected machine code...
+  printAndVerify("After Instruction Selection");
+
   return false;
 }
 
@@ -872,12 +883,6 @@ void TargetPassConfig::addMachinePasses() {
       insertPass(TID, IID);
     }
   }
-
-  // Print the instruction selected machine code...
-  printAndVerify("After Instruction Selection");
-
-  // Expand pseudo-instructions emitted by ISel.
-  addPass(&ExpandISelPseudosID);
 
   // Add passes that optimize machine instructions in SSA form.
   if (getOptLevel() != CodeGenOpt::None) {
@@ -1044,12 +1049,8 @@ defaultRegAlloc("default",
                 useDefaultRegisterAllocator);
 
 static void initializeDefaultRegisterAllocatorOnce() {
-  RegisterRegAlloc::FunctionPassCtor Ctor = RegisterRegAlloc::getDefault();
-
-  if (!Ctor) {
-    Ctor = RegAlloc;
+  if (!RegisterRegAlloc::getDefault())
     RegisterRegAlloc::setDefault(RegAlloc);
-  }
 }
 
 /// Instantiate the default register allocator pass for this target for either
@@ -1167,6 +1168,10 @@ void TargetPassConfig::addOptimizedRegAlloc() {
   addPass(&MachineSchedulerID);
 
   if (addRegAssignmentOptimized()) {
+    // Allow targets to expand pseudo instructions depending on the choice of
+    // registers before MachineCopyPropagation.
+    addPostRewrite();
+
     // Copy propagate to forward register uses and try to eliminate COPYs that
     // were not coalesced.
     addPass(&MachineCopyPropagationID);
@@ -1225,5 +1230,9 @@ bool TargetPassConfig::reportDiagnosticWhenGlobalISelFallback() const {
 }
 
 bool TargetPassConfig::isGISelCSEEnabled() const {
-  return getOptLevel() != CodeGenOpt::Level::None;
+  return true;
+}
+
+std::unique_ptr<CSEConfigBase> TargetPassConfig::getCSEConfig() const {
+  return std::make_unique<CSEConfigBase>();
 }

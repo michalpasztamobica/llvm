@@ -102,6 +102,12 @@ static cl::opt<bool> PrintLVIAfterJumpThreading(
     cl::desc("Print the LazyValueInfo cache after JumpThreading"), cl::init(false),
     cl::Hidden);
 
+static cl::opt<bool> ThreadAcrossLoopHeaders(
+    "jump-threading-across-loop-headers",
+    cl::desc("Allow JumpThreading to thread across loop headers, for testing"),
+    cl::init(false), cl::Hidden);
+
+
 namespace {
 
   /// This pass performs 'jump threading', which looks at blocks that have
@@ -218,13 +224,21 @@ static void updatePredecessorProfileMetadata(PHINode *PN, BasicBlock *BB) {
          BasicBlock *PhiBB) -> std::pair<BasicBlock *, BasicBlock *> {
     auto *PredBB = IncomingBB;
     auto *SuccBB = PhiBB;
+    SmallPtrSet<BasicBlock *, 16> Visited;
     while (true) {
       BranchInst *PredBr = dyn_cast<BranchInst>(PredBB->getTerminator());
       if (PredBr && PredBr->isConditional())
         return {PredBB, SuccBB};
+      Visited.insert(PredBB);
       auto *SinglePredBB = PredBB->getSinglePredecessor();
       if (!SinglePredBB)
         return {nullptr, nullptr};
+
+      // Stop searching when SinglePredBB has been visited. It means we see
+      // an unreachable loop.
+      if (Visited.count(SinglePredBB))
+        return {nullptr, nullptr};
+
       SuccBB = PredBB;
       PredBB = SinglePredBB;
     }
@@ -247,7 +261,9 @@ static void updatePredecessorProfileMetadata(PHINode *PN, BasicBlock *BB) {
       return;
 
     BasicBlock *PredBB = PredOutEdge.first;
-    BranchInst *PredBr = cast<BranchInst>(PredBB->getTerminator());
+    BranchInst *PredBr = dyn_cast<BranchInst>(PredBB->getTerminator());
+    if (!PredBr)
+      return;
 
     uint64_t PredTrueWeight, PredFalseWeight;
     // FIXME: We currently only set the profile data when it is missing.
@@ -280,7 +296,7 @@ static void updatePredecessorProfileMetadata(PHINode *PN, BasicBlock *BB) {
 bool JumpThreading::runOnFunction(Function &F) {
   if (skipFunction(F))
     return false;
-  auto TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
+  auto TLI = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI(F);
   // Get DT analysis before LVI. When LVI is initialized it conditionally adds
   // DT if it's available.
   auto DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
@@ -368,7 +384,8 @@ bool JumpThreadingPass::runImpl(Function &F, TargetLibraryInfo *TLI_,
     if (!DT.isReachableFromEntry(&BB))
       Unreachable.insert(&BB);
 
-  FindLoopHeaders(F);
+  if (!ThreadAcrossLoopHeaders)
+    FindLoopHeaders(F);
 
   bool EverChanged = false;
   bool Changed;
@@ -1174,7 +1191,8 @@ bool JumpThreadingPass::ProcessBlock(BasicBlock *BB) {
   }
 
   if (SwitchInst *SI = dyn_cast<SwitchInst>(BB->getTerminator()))
-    TryToUnfoldSelect(SI, BB);
+    if (TryToUnfoldSelect(SI, BB))
+      return true;
 
   // Check for some cases that are worth simplifying.  Right now we want to look
   // for loads that are used by a switch or by the condition for the branch.  If
@@ -1479,8 +1497,7 @@ bool JumpThreadingPass::SimplifyPartiallyRedundantLoad(LoadInst *LoadI) {
   for (pred_iterator PI = PB; PI != PE; ++PI) {
     BasicBlock *P = *PI;
     AvailablePredsTy::iterator I =
-      std::lower_bound(AvailablePreds.begin(), AvailablePreds.end(),
-                       std::make_pair(P, (Value*)nullptr));
+        llvm::lower_bound(AvailablePreds, std::make_pair(P, (Value *)nullptr));
 
     assert(I != AvailablePreds.end() && I->first == P &&
            "Didn't find entry for predecessor!");
@@ -1606,7 +1623,6 @@ bool JumpThreadingPass::ProcessThreadableEdges(Value *Cond, BasicBlock *BB,
   Constant *OnlyVal = nullptr;
   Constant *MultipleVal = (Constant *)(intptr_t)~0ULL;
 
-  unsigned PredWithKnownDest = 0;
   for (const auto &PredValue : PredValues) {
     BasicBlock *Pred = PredValue.second;
     if (!SeenPreds.insert(Pred).second)
@@ -1643,9 +1659,6 @@ bool JumpThreadingPass::ProcessThreadableEdges(Value *Cond, BasicBlock *BB,
         OnlyVal = MultipleVal;
     }
 
-    // We know where this predecessor is going.
-    ++PredWithKnownDest;
-
     // If the predecessor ends with an indirect goto, we can't change its
     // destination. Same for CallBr.
     if (isa<IndirectBrInst>(Pred->getTerminator()) ||
@@ -1663,7 +1676,7 @@ bool JumpThreadingPass::ProcessThreadableEdges(Value *Cond, BasicBlock *BB,
   // not thread. By doing so, we do not need to duplicate the current block and
   // also miss potential opportunities in case we dont/cant duplicate.
   if (OnlyDest && OnlyDest != MultipleDestSentinel) {
-    if (PredWithKnownDest == (size_t)pred_size(BB)) {
+    if (BB->hasNPredecessors(PredToDestList.size())) {
       bool SeenFirstBranchToOnlyDest = false;
       std::vector <DominatorTree::UpdateType> Updates;
       Updates.reserve(BB->getTerminator()->getNumSuccessors() - 1);
@@ -1982,8 +1995,14 @@ bool JumpThreadingPass::ThreadEdge(BasicBlock *BB,
   }
 
   BasicBlock::iterator BI = BB->begin();
-  for (; PHINode *PN = dyn_cast<PHINode>(BI); ++BI)
-    ValueMapping[PN] = PN->getIncomingValueForBlock(PredBB);
+  // Clone the phi nodes of BB into NewBB. The resulting phi nodes are trivial,
+  // since NewBB only has one predecessor, but SSAUpdater might need to rewrite
+  // the operand of the cloned phi.
+  for (; PHINode *PN = dyn_cast<PHINode>(BI); ++BI) {
+    PHINode *NewPN = PHINode::Create(PN->getType(), 1, PN->getName(), NewBB);
+    NewPN->addIncoming(PN->getIncomingValueForBlock(PredBB), PredBB);
+    ValueMapping[PN] = NewPN;
+  }
 
   // Clone the non-phi instructions of BB into NewBB, keeping track of the
   // mapping and using it to remap operands in the cloned instructions.

@@ -8,6 +8,8 @@ target triple = "thumbv7em-arm-none-eabi"
 define arm_aapcs_vfpcc void @test(i8* %v50) #0 {
 ; CHECK-LABEL: test:
 ; CHECK:       @ %bb.0:
+; CHECK-NEXT:    movw r1, #65534
+; CHECK-NEXT:    strh.w r1, [r0, #510]
 ; CHECK-NEXT:    movw r1, #64506
 ; CHECK-NEXT:    movt r1, #65020
 ; CHECK-NEXT:    str.w r1, [r0, #506]
@@ -92,8 +94,6 @@ define arm_aapcs_vfpcc void @test(i8* %v50) #0 {
 ; CHECK-NEXT:    movw r1, #36750
 ; CHECK-NEXT:    movt r1, #37264
 ; CHECK-NEXT:    str.w r1, [r0, #398]
-; CHECK-NEXT:    movw r1, #65534
-; CHECK-NEXT:    strh.w r1, [r0, #510]
 ; CHECK-NEXT:    movw r1, #35722
 ; CHECK-NEXT:    movt r1, #36236
 ; CHECK-NEXT:    str.w r1, [r0, #394]
@@ -337,5 +337,5 @@ define arm_aapcs_vfpcc void @test(i8* %v50) #0 {
   ret void
   }
 
-attributes #0 = { nounwind "correctly-rounded-divide-sqrt-fp-math"="false" "denormal-fp-math"="preserve-sign" "disable-tail-calls"="false" "less-precise-fpmad"="false" "no-frame-pointer-elim"="false" "no-infs-fp-math"="true" "no-jump-tables"="false" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="cortex-m7" "target-features"="+d16,+dsp,+fp-armv8,+hwdiv,+thumb-mode,-crc,-crypto,-dotprod,-fp-only-sp,-fullfp16,-hwdiv-arm,-neon,-ras" "unsafe-fp-math"="false" "use-soft-float"="false" }
+attributes #0 = { nounwind "correctly-rounded-divide-sqrt-fp-math"="false" "denormal-fp-math"="preserve-sign" "disable-tail-calls"="false" "less-precise-fpmad"="false" "no-frame-pointer-elim"="false" "no-infs-fp-math"="true" "no-jump-tables"="false" "no-nans-fp-math"="true" "no-signed-zeros-fp-math"="true" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="cortex-m7" "target-features"="-d32,+dsp,+fp-armv8,+hwdiv,+thumb-mode,-crc,-crypto,-dotprod,-fullfp16,-hwdiv-arm,-neon,-ras" "unsafe-fp-math"="false" "use-soft-float"="false" }
 

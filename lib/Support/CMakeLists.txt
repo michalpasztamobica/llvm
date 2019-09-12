@@ -53,6 +53,7 @@ endif()
 
 add_llvm_library(LLVMSupport
   AArch64TargetParser.cpp
+  ABIBreak.cpp
   ARMTargetParser.cpp
   AMDGPUMetadata.cpp
   APFloat.cpp
@@ -76,6 +77,7 @@ add_llvm_library(LLVMSupport
   CodeGenCoverage.cpp
   CommandLine.cpp
   Compression.cpp
+  CRC.cpp
   ConvertUTF.cpp
   ConvertUTFWrapper.cpp
   CrashRecoveryContext.cpp
@@ -88,6 +90,7 @@ add_llvm_library(LLVMSupport
   Error.cpp
   ErrorHandling.cpp
   FileCheck.cpp
+  FileCollector.cpp
   FileUtilities.cpp
   FileOutputBuffer.cpp
   FoldingSet.cpp
@@ -139,6 +142,7 @@ add_llvm_library(LLVMSupport
   TarWriter.cpp
   TargetParser.cpp
   ThreadPool.cpp
+  TimeProfiler.cpp
   Timer.cpp
   ToolOutputFile.cpp
   TrigramIndex.cpp
@@ -167,7 +171,6 @@ add_llvm_library(LLVMSupport
   Errno.cpp
   Host.cpp
   Memory.cpp
-  Mutex.cpp
   Path.cpp
   Process.cpp
   Program.cpp

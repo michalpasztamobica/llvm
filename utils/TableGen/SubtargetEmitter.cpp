@@ -149,7 +149,7 @@ void SubtargetEmitter::Enumeration(raw_ostream &OS,
   unsigned N = DefList.size();
   if (N == 0)
     return;
-  if (N > MAX_SUBTARGET_FEATURES)
+  if (N + 1 > MAX_SUBTARGET_FEATURES)
     PrintFatalError("Too many subtarget features! Bump MAX_SUBTARGET_FEATURES.");
 
   OS << "namespace " << Target << " {\n";
@@ -168,6 +168,9 @@ void SubtargetEmitter::Enumeration(raw_ostream &OS,
     // Save the index for this feature.
     FeatureMap[Def] = i;
   }
+
+  OS << "  "
+     << "NumSubtargetFeatures = " << N << "\n";
 
   // Close enumeration and namespace
   OS << "};\n";
@@ -1725,7 +1728,7 @@ void SubtargetEmitter::emitGenMCSubtargetInfo(raw_ostream &OS) {
      << "    const MCInst *MI, unsigned CPUID) {\n";
   emitSchedModelHelpersImpl(OS, /* OnlyExpandMCPredicates */ true);
   OS << "}\n";
-  OS << "} // end of namespace " << Target << "_MC\n\n";
+  OS << "} // end namespace " << Target << "_MC\n\n";
 
   OS << "struct " << Target
      << "GenMCSubtargetInfo : public MCSubtargetInfo {\n";
@@ -1855,7 +1858,7 @@ void SubtargetEmitter::run(raw_ostream &OS) {
   OS << "namespace " << Target << "_MC {\n"
      << "unsigned resolveVariantSchedClassImpl(unsigned SchedClass,"
      << " const MCInst *MI, unsigned CPUID);\n"
-     << "}\n\n";
+     << "} // end namespace " << Target << "_MC\n\n";
   OS << "struct " << ClassName << " : public TargetSubtargetInfo {\n"
      << "  explicit " << ClassName << "(const Triple &TT, StringRef CPU, "
      << "StringRef FS);\n"

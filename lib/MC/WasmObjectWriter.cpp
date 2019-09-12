@@ -147,18 +147,7 @@ struct WasmRelocationEntry {
       : Offset(Offset), Symbol(Symbol), Addend(Addend), Type(Type),
         FixupSection(FixupSection) {}
 
-  bool hasAddend() const {
-    switch (Type) {
-    case wasm::R_WASM_MEMORY_ADDR_LEB:
-    case wasm::R_WASM_MEMORY_ADDR_SLEB:
-    case wasm::R_WASM_MEMORY_ADDR_I32:
-    case wasm::R_WASM_FUNCTION_OFFSET_I32:
-    case wasm::R_WASM_SECTION_OFFSET_I32:
-      return true;
-    default:
-      return false;
-    }
-  }
+  bool hasAddend() const { return wasm::relocTypeHasAddend(Type); }
 
   void print(raw_ostream &Out) const {
     Out << wasm::relocTypetoString(Type) << " Off=" << Offset
@@ -269,9 +258,7 @@ class WasmObjectWriter : public MCObjectWriter {
 
   // TargetObjectWriter wrappers.
   bool is64Bit() const { return TargetObjectWriter->is64Bit(); }
-  unsigned getRelocType(const MCValue &Target, const MCFixup &Fixup) const {
-    return TargetObjectWriter->getRelocType(Target, Fixup);
-  }
+  bool isEmscripten() const { return TargetObjectWriter->isEmscripten(); }
 
   void startSection(SectionBookkeeping &Section, unsigned SectionId);
   void startCustomSection(SectionBookkeeping &Section, StringRef Name);
@@ -328,6 +315,7 @@ private:
   void writeFunctionSection(ArrayRef<WasmFunction> Functions);
   void writeExportSection(ArrayRef<wasm::WasmExport> Exports);
   void writeElemSection(ArrayRef<uint32_t> TableElems);
+  void writeDataCountSection();
   void writeCodeSection(const MCAssembler &Asm, const MCAsmLayout &Layout,
                         ArrayRef<WasmFunction> Functions);
   void writeDataSection();
@@ -439,9 +427,10 @@ void WasmObjectWriter::recordRelocation(MCAssembler &Asm,
                                         const MCFragment *Fragment,
                                         const MCFixup &Fixup, MCValue Target,
                                         uint64_t &FixedValue) {
-  MCAsmBackend &Backend = Asm.getBackend();
-  bool IsPCRel = Backend.getFixupKindInfo(Fixup.getKind()).Flags &
-                 MCFixupKindInfo::FKF_IsPCRel;
+  // The WebAssembly backend should never generate FKF_IsPCRel fixups
+  assert(!(Asm.getBackend().getFixupKindInfo(Fixup.getKind()).Flags &
+           MCFixupKindInfo::FKF_IsPCRel));
+
   const auto &FixupSection = cast<MCSectionWasm>(*Fragment->getParent());
   uint64_t C = Target.getConstant();
   uint64_t FixupOffset = Layout.getFragmentOffset(Fragment) + Fixup.getOffset();
@@ -452,51 +441,22 @@ void WasmObjectWriter::recordRelocation(MCAssembler &Asm,
     return;
 
   if (const MCSymbolRefExpr *RefB = Target.getSymB()) {
-    assert(RefB->getKind() == MCSymbolRefExpr::VK_None &&
-           "Should not have constructed this");
-
-    // Let A, B and C being the components of Target and R be the location of
-    // the fixup. If the fixup is not pcrel, we want to compute (A - B + C).
-    // If it is pcrel, we want to compute (A - B + C - R).
-
-    // In general, Wasm has no relocations for -B. It can only represent (A + C)
-    // or (A + C - R). If B = R + K and the relocation is not pcrel, we can
-    // replace B to implement it: (A - R - K + C)
-    if (IsPCRel) {
-      Ctx.reportError(
-          Fixup.getLoc(),
-          "No relocation available to represent this relative expression");
-      return;
-    }
-
+    // To get here the A - B expression must have failed evaluateAsRelocatable.
+    // This means either A or B must be undefined and in WebAssembly we can't
+    // support either of those cases.
     const auto &SymB = cast<MCSymbolWasm>(RefB->getSymbol());
-
-    if (SymB.isUndefined()) {
-      Ctx.reportError(Fixup.getLoc(),
-                      Twine("symbol '") + SymB.getName() +
-                          "' can not be undefined in a subtraction expression");
-      return;
-    }
-
-    assert(!SymB.isAbsolute() && "Should have been folded");
-    const MCSection &SecB = SymB.getSection();
-    if (&SecB != &FixupSection) {
-      Ctx.reportError(Fixup.getLoc(),
-                      "Cannot represent a difference across sections");
-      return;
-    }
-
-    uint64_t SymBOffset = Layout.getSymbolOffset(SymB);
-    uint64_t K = SymBOffset - FixupOffset;
-    IsPCRel = true;
-    C -= K;
+    Ctx.reportError(
+        Fixup.getLoc(),
+        Twine("symbol '") + SymB.getName() +
+            "': unsupported subtraction expression used in relocation.");
+    return;
   }
 
   // We either rejected the fixup or folded B into C at this point.
   const MCSymbolRefExpr *RefA = Target.getSymA();
-  const auto *SymA = RefA ? cast<MCSymbolWasm>(&RefA->getSymbol()) : nullptr;
+  const auto *SymA = cast<MCSymbolWasm>(&RefA->getSymbol());
 
-  if (SymA && SymA->isVariable()) {
+  if (SymA->isVariable()) {
     const MCExpr *Expr = SymA->getVariableValue();
     const auto *Inner = cast<MCSymbolRefExpr>(Expr);
     if (Inner->getKind() == MCSymbolRefExpr::VK_WEAKREF)
@@ -508,9 +468,7 @@ void WasmObjectWriter::recordRelocation(MCAssembler &Asm,
   // be negative and don't wrap.
   FixedValue = 0;
 
-  unsigned Type = getRelocType(Target, Fixup);
-  assert(!IsPCRel);
-  assert(SymA);
+  unsigned Type = TargetObjectWriter->getRelocType(Target, Fixup);
 
   // Absolute offset within a section or a function.
   // Currently only supported for for metadata sections.
@@ -583,6 +541,7 @@ WasmObjectWriter::getProvisionalValue(const WasmRelocationEntry &RelEntry) {
   }
 
   switch (RelEntry.Type) {
+  case wasm::R_WASM_TABLE_INDEX_REL_SLEB:
   case wasm::R_WASM_TABLE_INDEX_SLEB:
   case wasm::R_WASM_TABLE_INDEX_I32: {
     // Provisional value is table address of the resolved symbol itself
@@ -607,6 +566,7 @@ WasmObjectWriter::getProvisionalValue(const WasmRelocationEntry &RelEntry) {
   }
   case wasm::R_WASM_MEMORY_ADDR_LEB:
   case wasm::R_WASM_MEMORY_ADDR_I32:
+  case wasm::R_WASM_MEMORY_ADDR_REL_SLEB:
   case wasm::R_WASM_MEMORY_ADDR_SLEB: {
     // Provisional value is address of the global
     const MCSymbolWasm *Sym = resolveSymbol(*RelEntry.Symbol);
@@ -701,7 +661,9 @@ void WasmObjectWriter::applyRelocations(
       writeI32(Stream, Value, Offset);
       break;
     case wasm::R_WASM_TABLE_INDEX_SLEB:
+    case wasm::R_WASM_TABLE_INDEX_REL_SLEB:
     case wasm::R_WASM_MEMORY_ADDR_SLEB:
+    case wasm::R_WASM_MEMORY_ADDR_REL_SLEB:
       writePatchableSLEB(Stream, Value, Offset);
       break;
     default:
@@ -847,6 +809,16 @@ void WasmObjectWriter::writeElemSection(ArrayRef<uint32_t> TableElems) {
   endSection(Section);
 }
 
+void WasmObjectWriter::writeDataCountSection() {
+  if (DataSegments.empty())
+    return;
+
+  SectionBookkeeping Section;
+  startSection(Section, wasm::WASM_SEC_DATACOUNT);
+  encodeULEB128(DataSegments.size(), W.OS);
+  endSection(Section);
+}
+
 void WasmObjectWriter::writeCodeSection(const MCAssembler &Asm,
                                         const MCAsmLayout &Layout,
                                         ArrayRef<WasmFunction> Functions) {
@@ -921,9 +893,8 @@ void WasmObjectWriter::writeRelocSection(
   // order, but for the code section we combine many MC sections into single
   // wasm section, and this order is determined by the order of Asm.Symbols()
   // not the sections order.
-  std::stable_sort(
-      Relocs.begin(), Relocs.end(),
-      [](const WasmRelocationEntry &A, const WasmRelocationEntry &B) {
+  llvm::stable_sort(
+      Relocs, [](const WasmRelocationEntry &A, const WasmRelocationEntry &B) {
         return (A.Offset + A.FixupSection->getSectionOffset()) <
                (B.Offset + B.FixupSection->getSectionOffset());
       });
@@ -1296,12 +1267,12 @@ uint64_t WasmObjectWriter::writeObject(MCAssembler &Asm,
 
       // Separate out the producers and target features sections
       if (Name == "producers") {
-        ProducersSection = llvm::make_unique<WasmCustomSection>(Name, &Section);
+        ProducersSection = std::make_unique<WasmCustomSection>(Name, &Section);
         continue;
       }
       if (Name == "target_features") {
         TargetFeaturesSection =
-            llvm::make_unique<WasmCustomSection>(Name, &Section);
+            std::make_unique<WasmCustomSection>(Name, &Section);
         continue;
       }
 
@@ -1413,7 +1384,6 @@ uint64_t WasmObjectWriter::writeObject(MCAssembler &Asm,
       } else {
         // An import; the index was assigned above.
         assert(WasmIndices.count(&WS) > 0);
-        Index = WasmIndices.find(&WS)->second;
       }
       LLVM_DEBUG(dbgs() << "  -> event index: " << WasmIndices.find(&WS)->second
                         << "\n");
@@ -1474,8 +1444,12 @@ uint64_t WasmObjectWriter::writeObject(MCAssembler &Asm,
       Flags |= wasm::WASM_SYMBOL_BINDING_LOCAL;
     if (WS.isUndefined())
       Flags |= wasm::WASM_SYMBOL_UNDEFINED;
-    if (WS.isExported())
-      Flags |= wasm::WASM_SYMBOL_EXPORTED;
+    if (WS.isNoStrip()) {
+      Flags |= wasm::WASM_SYMBOL_NO_STRIP;
+      if (isEmscripten()) {
+        Flags |= wasm::WASM_SYMBOL_EXPORTED;
+      }
+    }
     if (WS.getName() != WS.getImportName())
       Flags |= wasm::WASM_SYMBOL_EXPLICIT_NAME;
 
@@ -1598,6 +1572,7 @@ uint64_t WasmObjectWriter::writeObject(MCAssembler &Asm,
   writeEventSection(Events);
   writeExportSection(Exports);
   writeElemSection(TableElems);
+  writeDataCountSection();
   writeCodeSection(Asm, Layout, Functions);
   writeDataSection();
   for (auto &CustomSection : CustomSections)
@@ -1618,5 +1593,5 @@ uint64_t WasmObjectWriter::writeObject(MCAssembler &Asm,
 std::unique_ptr<MCObjectWriter>
 llvm::createWasmObjectWriter(std::unique_ptr<MCWasmObjectTargetWriter> MOTW,
                              raw_pwrite_stream &OS) {
-  return llvm::make_unique<WasmObjectWriter>(std::move(MOTW), OS);
+  return std::make_unique<WasmObjectWriter>(std::move(MOTW), OS);
 }
