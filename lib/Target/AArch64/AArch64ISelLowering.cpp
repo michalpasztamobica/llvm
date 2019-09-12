@@ -5665,8 +5665,6 @@ AArch64TargetLowering::getConstraintType(StringRef Constraint) const {
     switch (Constraint[0]) {
     default:
       break;
-    case 'z':
-      return C_Other;
     case 'x':
     case 'w':
       return C_RegisterClass;
@@ -5674,6 +5672,16 @@ AArch64TargetLowering::getConstraintType(StringRef Constraint) const {
     // currently handle addresses it is the same as 'r'.
     case 'Q':
       return C_Memory;
+    case 'I':
+    case 'J':
+    case 'K':
+    case 'L':
+    case 'M':
+    case 'N':
+    case 'Y':
+    case 'Z':
+      return C_Immediate;
+    case 'z':
     case 'S': // A symbolic address
       return C_Other;
     }
@@ -10571,7 +10579,7 @@ static SDValue performPostLD1Combine(SDNode *N,
     // are predecessors to each other or the Vector.
     SmallPtrSet<const SDNode *, 32> Visited;
     SmallVector<const SDNode *, 16> Worklist;
-    Visited.insert(N);
+    Visited.insert(Addr.getNode());
     Worklist.push_back(User);
     Worklist.push_back(LD);
     Worklist.push_back(Vector.getNode());
@@ -11985,6 +11993,14 @@ bool AArch64TargetLowering::isMaskAndCmp0FoldingBeneficial(
   if (!Mask)
     return false;
   return Mask->getValue().isPowerOf2();
+}
+
+bool AArch64TargetLowering::shouldExpandShift(SelectionDAG &DAG,
+                                              SDNode *N) const {
+  if (DAG.getMachineFunction().getFunction().hasMinSize() &&
+      !Subtarget->isTargetWindows())
+    return false;
+  return true;
 }
 
 void AArch64TargetLowering::initializeSplitCSR(MachineBasicBlock *Entry) const {
