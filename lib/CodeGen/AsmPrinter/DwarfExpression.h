@@ -325,7 +325,8 @@ public:
 
 /// DwarfExpression implementation for singular DW_AT_location.
 class DIEDwarfExpression final : public DwarfExpression {
-const AsmPrinter &AP;
+  const AsmPrinter &AP;
+  //DwarfUnit &DU;
   DIELoc &DIE;
 
   void emitOp(uint8_t Op, const char *Comment = nullptr) override;
