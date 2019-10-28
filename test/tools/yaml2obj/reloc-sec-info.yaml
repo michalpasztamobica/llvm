@@ -20,7 +20,6 @@ FileHeader:
 Sections:
   - Name:            .rela.text
     Type:            SHT_RELA
-    Link:            .symtab
     Info:            12345
     Relocations:
 
@@ -30,7 +29,6 @@ Sections:
 
 # ERR: error: unknown section referenced: '.unknown1' by YAML section '.foo'
 # ERR: error: unknown section referenced: '.unknown2' by YAML section '.bar'
-# ERR: error: yaml2obj failed
 
 --- !ELF
 FileHeader:

@@ -263,7 +263,7 @@ static Error linkToBuildIdDir(const CopyConfig &Config, StringRef ToLink,
 
 static Error splitDWOToFile(const CopyConfig &Config, const Reader &Reader,
                             StringRef File, ElfType OutputElfType) {
-  auto DWOFile = Reader.create();
+  auto DWOFile = Reader.create(false);
   auto OnlyKeepDWOPred = [&DWOFile](const SectionBase &Sec) {
     return onlyKeepDWOPred(*DWOFile, Sec);
   };
@@ -670,6 +670,14 @@ static Error handleArgs(const CopyConfig &Config, Object &Obj,
     }
   }
 
+  if (!Config.SetSectionAlignment.empty()) {
+    for (SectionBase &Sec : Obj.sections()) {
+      auto I = Config.SetSectionAlignment.find(Sec.Name);
+      if (I != Config.SetSectionAlignment.end())
+        Sec.Align = I->second;
+    }
+  }
+
   if (!Config.SetSectionFlags.empty()) {
     for (auto &Sec : Obj.sections()) {
       const auto Iter = Config.SetSectionFlags.find(Sec.Name);
@@ -710,7 +718,7 @@ static Error handleArgs(const CopyConfig &Config, Object &Obj,
     Obj.addSection<GnuDebugLinkSection>(Config.AddGnuDebugLink,
                                         Config.GnuDebugLinkCRC32);
 
-  for (const NewSymbolInfo &SI : Config.SymbolsToAdd) {
+  for (const NewSymbolInfo &SI : Config.ELF->SymbolsToAdd) {
     SectionBase *Sec = Obj.findSection(SI.SectionName);
     uint64_t Value = Sec ? Sec->Addr + SI.Value : SI.Value;
     Obj.SymbolTable->addSymbol(
@@ -735,9 +743,9 @@ static Error writeOutput(const CopyConfig &Config, Object &Obj, Buffer &Out,
 Error executeObjcopyOnIHex(const CopyConfig &Config, MemoryBuffer &In,
                            Buffer &Out) {
   IHexReader Reader(&In);
-  std::unique_ptr<Object> Obj = Reader.create();
+  std::unique_ptr<Object> Obj = Reader.create(true);
   const ElfType OutputElfType =
-      getOutputElfType(Config.OutputArch.getValueOr(Config.BinaryArch));
+    getOutputElfType(Config.OutputArch.getValueOr(MachineInfo()));
   if (Error E = handleArgs(Config, *Obj, Reader, OutputElfType))
     return E;
   return writeOutput(Config, *Obj, Out, OutputElfType);
@@ -746,14 +754,14 @@ Error executeObjcopyOnIHex(const CopyConfig &Config, MemoryBuffer &In,
 Error executeObjcopyOnRawBinary(const CopyConfig &Config, MemoryBuffer &In,
                                 Buffer &Out) {
   uint8_t NewSymbolVisibility =
-      Config.NewSymbolVisibility.getValueOr((uint8_t)ELF::STV_DEFAULT);
-  BinaryReader Reader(Config.BinaryArch, &In, NewSymbolVisibility);
-  std::unique_ptr<Object> Obj = Reader.create();
+      Config.ELF->NewSymbolVisibility.getValueOr((uint8_t)ELF::STV_DEFAULT);
+  BinaryReader Reader(&In, NewSymbolVisibility);
+  std::unique_ptr<Object> Obj = Reader.create(true);
 
   // Prefer OutputArch (-O<format>) if set, otherwise fallback to BinaryArch
   // (-B<arch>).
   const ElfType OutputElfType =
-      getOutputElfType(Config.OutputArch.getValueOr(Config.BinaryArch));
+      getOutputElfType(Config.OutputArch.getValueOr(MachineInfo()));
   if (Error E = handleArgs(Config, *Obj, Reader, OutputElfType))
     return E;
   return writeOutput(Config, *Obj, Out, OutputElfType);
@@ -762,7 +770,7 @@ Error executeObjcopyOnRawBinary(const CopyConfig &Config, MemoryBuffer &In,
 Error executeObjcopyOnBinary(const CopyConfig &Config,
                              object::ELFObjectFileBase &In, Buffer &Out) {
   ELFReader Reader(&In, Config.ExtractPartition);
-  std::unique_ptr<Object> Obj = Reader.create();
+  std::unique_ptr<Object> Obj = Reader.create(!Config.SymbolsToAdd.empty());
   // Prefer OutputArch (-O<format>) if set, otherwise infer it from the input.
   const ElfType OutputElfType =
       Config.OutputArch ? getOutputElfType(Config.OutputArch.getValue())

@@ -1461,7 +1461,7 @@ public:
     if (Value *V = foldConstant(Opc, LHS, RHS, Name)) return V;
     Instruction *BinOp = BinaryOperator::Create(Opc, LHS, RHS);
     if (isa<FPMathOperator>(BinOp))
-      BinOp = setFPAttrs(BinOp, FPMathTag, FMF);
+      setFPAttrs(BinOp, FPMathTag, FMF);
     return Insert(BinOp, Name);
   }
 
@@ -1479,7 +1479,8 @@ public:
 
     CallInst *C = CreateIntrinsic(ID, {L->getType()},
                                   {L, R, RoundingV, ExceptV}, nullptr, Name);
-    return cast<CallInst>(setFPAttrs(C, FPMathTag, UseFMF));
+    setFPAttrs(C, FPMathTag, UseFMF);
+    return C;
   }
 
   Value *CreateNeg(Value *V, const Twine &Name = "",
@@ -1504,7 +1505,7 @@ public:
                     MDNode *FPMathTag = nullptr) {
     if (auto *VC = dyn_cast<Constant>(V))
       return Insert(Folder.CreateFNeg(VC), Name);
-    return Insert(setFPAttrs(BinaryOperator::CreateFNeg(V), FPMathTag, FMF),
+    return Insert(setFPAttrs(UnaryOperator::CreateFNeg(V), FPMathTag, FMF),
                   Name);
   }
 
@@ -1514,9 +1515,7 @@ public:
                        const Twine &Name = "") {
    if (auto *VC = dyn_cast<Constant>(V))
      return Insert(Folder.CreateFNeg(VC), Name);
-   // TODO: This should return UnaryOperator::CreateFNeg(...) once we are
-   // confident that they are optimized sufficiently.
-   return Insert(setFPAttrs(BinaryOperator::CreateFNeg(V), nullptr,
+   return Insert(setFPAttrs(UnaryOperator::CreateFNeg(V), nullptr,
                             FMFSource->getFastMathFlags()),
                  Name);
   }
@@ -1534,7 +1533,7 @@ public:
       return Insert(Folder.CreateUnOp(Opc, VC), Name);
     Instruction *UnOp = UnaryOperator::Create(Opc, V);
     if (isa<FPMathOperator>(UnOp))
-      UnOp = setFPAttrs(UnOp, FPMathTag, FMF);
+      setFPAttrs(UnOp, FPMathTag, FMF);
     return Insert(UnOp, Name);
   }
 
@@ -1612,19 +1611,19 @@ public:
   LoadInst *CreateAlignedLoad(Type *Ty, Value *Ptr, unsigned Align,
                               const char *Name) {
     LoadInst *LI = CreateLoad(Ty, Ptr, Name);
-    LI->setAlignment(Align);
+    LI->setAlignment(MaybeAlign(Align));
     return LI;
   }
   LoadInst *CreateAlignedLoad(Type *Ty, Value *Ptr, unsigned Align,
                               const Twine &Name = "") {
     LoadInst *LI = CreateLoad(Ty, Ptr, Name);
-    LI->setAlignment(Align);
+    LI->setAlignment(MaybeAlign(Align));
     return LI;
   }
   LoadInst *CreateAlignedLoad(Type *Ty, Value *Ptr, unsigned Align,
                               bool isVolatile, const Twine &Name = "") {
     LoadInst *LI = CreateLoad(Ty, Ptr, isVolatile, Name);
-    LI->setAlignment(Align);
+    LI->setAlignment(MaybeAlign(Align));
     return LI;
   }
 
@@ -1649,7 +1648,7 @@ public:
   StoreInst *CreateAlignedStore(Value *Val, Value *Ptr, unsigned Align,
                                 bool isVolatile = false) {
     StoreInst *SI = CreateStore(Val, Ptr, isVolatile);
-    SI->setAlignment(Align);
+    SI->setAlignment(MaybeAlign(Align));
     return SI;
   }
 
@@ -2086,7 +2085,7 @@ public:
       break;
     }
     if (isa<FPMathOperator>(C))
-      C = cast<CallInst>(setFPAttrs(C, FPMathTag, UseFMF));
+      setFPAttrs(C, FPMathTag, UseFMF);
     return C;
   }
 
@@ -2231,7 +2230,10 @@ public:
 
   PHINode *CreatePHI(Type *Ty, unsigned NumReservedValues,
                      const Twine &Name = "") {
-    return Insert(PHINode::Create(Ty, NumReservedValues), Name);
+    PHINode *Phi = PHINode::Create(Ty, NumReservedValues);
+    if (isa<FPMathOperator>(Phi))
+      setFPAttrs(Phi, nullptr /* MDNode* */, FMF);
+    return Insert(Phi, Name);
   }
 
   CallInst *CreateCall(FunctionType *FTy, Value *Callee,
@@ -2239,7 +2241,7 @@ public:
                        MDNode *FPMathTag = nullptr) {
     CallInst *CI = CallInst::Create(FTy, Callee, Args, DefaultOperandBundles);
     if (isa<FPMathOperator>(CI))
-      CI = cast<CallInst>(setFPAttrs(CI, FPMathTag, FMF));
+      setFPAttrs(CI, FPMathTag, FMF);
     return Insert(CI, Name);
   }
 
@@ -2248,7 +2250,7 @@ public:
                        const Twine &Name = "", MDNode *FPMathTag = nullptr) {
     CallInst *CI = CallInst::Create(FTy, Callee, Args, OpBundles);
     if (isa<FPMathOperator>(CI))
-      CI = cast<CallInst>(setFPAttrs(CI, FPMathTag, FMF));
+      setFPAttrs(CI, FPMathTag, FMF);
     return Insert(CI, Name);
   }
 
@@ -2296,7 +2298,7 @@ public:
       Sel = addBranchMetadata(Sel, Prof, Unpred);
     }
     if (isa<FPMathOperator>(Sel))
-      Sel = cast<SelectInst>(setFPAttrs(Sel, nullptr /* MDNode* */, FMF));
+      setFPAttrs(Sel, nullptr /* MDNode* */, FMF);
     return Insert(Sel, Name);
   }
 

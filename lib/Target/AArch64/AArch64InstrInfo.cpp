@@ -929,7 +929,7 @@ bool AArch64InstrInfo::isCoalescableExtInstr(const MachineInstr &MI,
 }
 
 bool AArch64InstrInfo::areMemAccessesTriviallyDisjoint(
-    const MachineInstr &MIa, const MachineInstr &MIb, AliasAnalysis *AA) const {
+    const MachineInstr &MIa, const MachineInstr &MIb) const {
   const TargetRegisterInfo *TRI = &getRegisterInfo();
   const MachineOperand *BaseOpA = nullptr, *BaseOpB = nullptr;
   int64_t OffsetA = 0, OffsetB = 0;
@@ -2198,6 +2198,18 @@ bool AArch64InstrInfo::getMemOpInfo(unsigned Opcode, unsigned &Scale,
     MinOffset = -256;
     MaxOffset = 255;
     break;
+  case AArch64::LDR_PXI:
+  case AArch64::STR_PXI:
+    Scale = Width = 2;
+    MinOffset = -256;
+    MaxOffset = 255;
+    break;
+  case AArch64::LDR_ZXI:
+  case AArch64::STR_ZXI:
+    Scale = Width = 16;
+    MinOffset = -256;
+    MaxOffset = 255;
+    break;
   case AArch64::ST2GOffset:
   case AArch64::STZ2GOffset:
     Scale = 16;
@@ -2504,6 +2516,17 @@ void AArch64InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
             .addReg(SrcReg, getKillRegState(KillSrc));
       }
     }
+    return;
+  }
+
+  // Copy a Predicate register by ORRing with itself.
+  if (AArch64::PPRRegClass.contains(DestReg) &&
+      AArch64::PPRRegClass.contains(SrcReg)) {
+    assert(Subtarget.hasSVE() && "Unexpected SVE register.");
+    BuildMI(MBB, I, DL, get(AArch64::ORR_PPzPP), DestReg)
+      .addReg(SrcReg) // Pg
+      .addReg(SrcReg)
+      .addReg(SrcReg, getKillRegState(KillSrc));
     return;
   }
 
@@ -3035,6 +3058,16 @@ static void emitFrameOffsetAdj(MachineBasicBlock &MBB,
     MaxEncoding = 0xfff;
     ShiftSize = 12;
     break;
+  case AArch64::ADDVL_XXI:
+  case AArch64::ADDPL_XXI:
+    MaxEncoding = 31;
+    ShiftSize = 0;
+    if (Offset < 0) {
+      MaxEncoding = 32;
+      Sign = -1;
+      Offset = -Offset;
+    }
+    break;
   default:
     llvm_unreachable("Unsupported opcode");
   }
@@ -3106,8 +3139,8 @@ void llvm::emitFrameOffset(MachineBasicBlock &MBB,
                            StackOffset Offset, const TargetInstrInfo *TII,
                            MachineInstr::MIFlag Flag, bool SetNZCV,
                            bool NeedsWinCFI, bool *HasWinCFI) {
-  int64_t Bytes;
-  Offset.getForFrameOffset(Bytes);
+  int64_t Bytes, NumPredicateVectors, NumDataVectors;
+  Offset.getForFrameOffset(Bytes, NumPredicateVectors, NumDataVectors);
 
   // First emit non-scalable frame offsets, or a simple 'mov'.
   if (Bytes || (!Offset && SrcReg != DestReg)) {
@@ -3121,6 +3154,23 @@ void llvm::emitFrameOffset(MachineBasicBlock &MBB,
     emitFrameOffsetAdj(MBB, MBBI, DL, DestReg, SrcReg, Bytes, Opc, TII, Flag,
                        NeedsWinCFI, HasWinCFI);
     SrcReg = DestReg;
+  }
+
+  assert(!(SetNZCV && (NumPredicateVectors || NumDataVectors)) &&
+         "SetNZCV not supported with SVE vectors");
+  assert(!(NeedsWinCFI && (NumPredicateVectors || NumDataVectors)) &&
+         "WinCFI not supported with SVE vectors");
+
+  if (NumDataVectors) {
+    emitFrameOffsetAdj(MBB, MBBI, DL, DestReg, SrcReg, NumDataVectors,
+                       AArch64::ADDVL_XXI, TII, Flag, NeedsWinCFI, nullptr);
+    SrcReg = DestReg;
+  }
+
+  if (NumPredicateVectors) {
+    assert(DestReg != AArch64::SP && "Unaligned access to SP");
+    emitFrameOffsetAdj(MBB, MBBI, DL, DestReg, SrcReg, NumPredicateVectors,
+                       AArch64::ADDPL_XXI, TII, Flag, NeedsWinCFI, nullptr);
   }
 }
 
@@ -3302,11 +3352,23 @@ MachineInstr *AArch64InstrInfo::foldMemoryOperandImpl(
   return nullptr;
 }
 
+static bool isSVEScaledImmInstruction(unsigned Opcode) {
+  switch (Opcode) {
+  case AArch64::LDR_ZXI:
+  case AArch64::STR_ZXI:
+  case AArch64::LDR_PXI:
+  case AArch64::STR_PXI:
+    return true;
+  default:
+    return false;
+  }
+}
+
 int llvm::isAArch64FrameOffsetLegal(const MachineInstr &MI,
                                     StackOffset &SOffset,
                                     bool *OutUseUnscaledOp,
                                     unsigned *OutUnscaledOp,
-                                    int *EmittableOffset) {
+                                    int64_t *EmittableOffset) {
   // Set output values in case of early exit.
   if (EmittableOffset)
     *EmittableOffset = 0;
@@ -3345,9 +3407,13 @@ int llvm::isAArch64FrameOffsetLegal(const MachineInstr &MI,
     llvm_unreachable("unhandled opcode in isAArch64FrameOffsetLegal");
 
   // Construct the complete offset.
+  bool IsMulVL = isSVEScaledImmInstruction(MI.getOpcode());
+  int64_t Offset =
+      IsMulVL ? (SOffset.getScalableBytes()) : (SOffset.getBytes());
+
   const MachineOperand &ImmOpnd =
       MI.getOperand(AArch64InstrInfo::getLoadStoreImmIdx(MI.getOpcode()));
-  int Offset = SOffset.getBytes() + ImmOpnd.getImm() * Scale;
+  Offset += ImmOpnd.getImm() * Scale;
 
   // If the offset doesn't match the scale, we rewrite the instruction to
   // use the unscaled instruction instead. Likewise, if we have a negative
@@ -3364,7 +3430,7 @@ int llvm::isAArch64FrameOffsetLegal(const MachineInstr &MI,
          "Cannot have remainder when using unscaled op");
 
   assert(MinOff < MaxOff && "Unexpected Min/Max offsets");
-  int NewOffset = Offset / Scale;
+  int64_t NewOffset = Offset / Scale;
   if (MinOff <= NewOffset && NewOffset <= MaxOff)
     Offset = Remainder;
   else {
@@ -3379,9 +3445,14 @@ int llvm::isAArch64FrameOffsetLegal(const MachineInstr &MI,
   if (OutUnscaledOp && UnscaledOp)
     *OutUnscaledOp = *UnscaledOp;
 
-  SOffset = StackOffset(Offset, MVT::i8);
+  if (IsMulVL)
+    SOffset = StackOffset(Offset, MVT::nxv1i8) +
+              StackOffset(SOffset.getBytes(), MVT::i8);
+  else
+    SOffset = StackOffset(Offset, MVT::i8) +
+              StackOffset(SOffset.getScalableBytes(), MVT::nxv1i8);
   return AArch64FrameOffsetCanUpdate |
-         (Offset == 0 ? AArch64FrameOffsetIsLegal : 0);
+         (SOffset ? 0 : AArch64FrameOffsetIsLegal);
 }
 
 bool llvm::rewriteAArch64FrameIndex(MachineInstr &MI, unsigned FrameRegIdx,
@@ -3400,7 +3471,7 @@ bool llvm::rewriteAArch64FrameIndex(MachineInstr &MI, unsigned FrameRegIdx,
     return true;
   }
 
-  int NewOffset;
+  int64_t NewOffset;
   unsigned UnscaledOp;
   bool UseUnscaledOp;
   int Status = isAArch64FrameOffsetLegal(MI, Offset, &UseUnscaledOp,
@@ -3611,86 +3682,48 @@ static bool getMaddPatterns(MachineInstr &Root,
     Opc = NewOpc;
   }
 
+  auto setFound = [&](int Opcode, int Operand, unsigned ZeroReg,
+                      MachineCombinerPattern Pattern) {
+    if (canCombineWithMUL(MBB, Root.getOperand(Operand), Opcode, ZeroReg)) {
+      Patterns.push_back(Pattern);
+      Found = true;
+    }
+  };
+
+  typedef MachineCombinerPattern MCP;
+
   switch (Opc) {
   default:
     break;
   case AArch64::ADDWrr:
     assert(Root.getOperand(1).isReg() && Root.getOperand(2).isReg() &&
            "ADDWrr does not have register operands");
-    if (canCombineWithMUL(MBB, Root.getOperand(1), AArch64::MADDWrrr,
-                          AArch64::WZR)) {
-      Patterns.push_back(MachineCombinerPattern::MULADDW_OP1);
-      Found = true;
-    }
-    if (canCombineWithMUL(MBB, Root.getOperand(2), AArch64::MADDWrrr,
-                          AArch64::WZR)) {
-      Patterns.push_back(MachineCombinerPattern::MULADDW_OP2);
-      Found = true;
-    }
+    setFound(AArch64::MADDWrrr, 1, AArch64::WZR, MCP::MULADDW_OP1);
+    setFound(AArch64::MADDWrrr, 2, AArch64::WZR, MCP::MULADDW_OP2);
     break;
   case AArch64::ADDXrr:
-    if (canCombineWithMUL(MBB, Root.getOperand(1), AArch64::MADDXrrr,
-                          AArch64::XZR)) {
-      Patterns.push_back(MachineCombinerPattern::MULADDX_OP1);
-      Found = true;
-    }
-    if (canCombineWithMUL(MBB, Root.getOperand(2), AArch64::MADDXrrr,
-                          AArch64::XZR)) {
-      Patterns.push_back(MachineCombinerPattern::MULADDX_OP2);
-      Found = true;
-    }
+    setFound(AArch64::MADDXrrr, 1, AArch64::XZR, MCP::MULADDX_OP1);
+    setFound(AArch64::MADDXrrr, 2, AArch64::XZR, MCP::MULADDX_OP2);
     break;
   case AArch64::SUBWrr:
-    if (canCombineWithMUL(MBB, Root.getOperand(1), AArch64::MADDWrrr,
-                          AArch64::WZR)) {
-      Patterns.push_back(MachineCombinerPattern::MULSUBW_OP1);
-      Found = true;
-    }
-    if (canCombineWithMUL(MBB, Root.getOperand(2), AArch64::MADDWrrr,
-                          AArch64::WZR)) {
-      Patterns.push_back(MachineCombinerPattern::MULSUBW_OP2);
-      Found = true;
-    }
+    setFound(AArch64::MADDWrrr, 1, AArch64::WZR, MCP::MULSUBW_OP1);
+    setFound(AArch64::MADDWrrr, 2, AArch64::WZR, MCP::MULSUBW_OP2);
     break;
   case AArch64::SUBXrr:
-    if (canCombineWithMUL(MBB, Root.getOperand(1), AArch64::MADDXrrr,
-                          AArch64::XZR)) {
-      Patterns.push_back(MachineCombinerPattern::MULSUBX_OP1);
-      Found = true;
-    }
-    if (canCombineWithMUL(MBB, Root.getOperand(2), AArch64::MADDXrrr,
-                          AArch64::XZR)) {
-      Patterns.push_back(MachineCombinerPattern::MULSUBX_OP2);
-      Found = true;
-    }
+    setFound(AArch64::MADDXrrr, 1, AArch64::XZR, MCP::MULSUBX_OP1);
+    setFound(AArch64::MADDXrrr, 2, AArch64::XZR, MCP::MULSUBX_OP2);
     break;
   case AArch64::ADDWri:
-    if (canCombineWithMUL(MBB, Root.getOperand(1), AArch64::MADDWrrr,
-                          AArch64::WZR)) {
-      Patterns.push_back(MachineCombinerPattern::MULADDWI_OP1);
-      Found = true;
-    }
+    setFound(AArch64::MADDWrrr, 1, AArch64::WZR, MCP::MULADDWI_OP1);
     break;
   case AArch64::ADDXri:
-    if (canCombineWithMUL(MBB, Root.getOperand(1), AArch64::MADDXrrr,
-                          AArch64::XZR)) {
-      Patterns.push_back(MachineCombinerPattern::MULADDXI_OP1);
-      Found = true;
-    }
+    setFound(AArch64::MADDXrrr, 1, AArch64::XZR, MCP::MULADDXI_OP1);
     break;
   case AArch64::SUBWri:
-    if (canCombineWithMUL(MBB, Root.getOperand(1), AArch64::MADDWrrr,
-                          AArch64::WZR)) {
-      Patterns.push_back(MachineCombinerPattern::MULSUBWI_OP1);
-      Found = true;
-    }
+    setFound(AArch64::MADDWrrr, 1, AArch64::WZR, MCP::MULSUBWI_OP1);
     break;
   case AArch64::SUBXri:
-    if (canCombineWithMUL(MBB, Root.getOperand(1), AArch64::MADDXrrr,
-                          AArch64::XZR)) {
-      Patterns.push_back(MachineCombinerPattern::MULSUBXI_OP1);
-      Found = true;
-    }
+    setFound(AArch64::MADDXrrr, 1, AArch64::XZR, MCP::MULSUBXI_OP1);
     break;
   }
   return Found;
@@ -3707,6 +3740,17 @@ static bool getFMAPatterns(MachineInstr &Root,
   MachineBasicBlock &MBB = *Root.getParent();
   bool Found = false;
 
+  auto Match = [&](int Opcode, int Operand,
+                   MachineCombinerPattern Pattern) -> bool {
+    if (canCombineWithFMUL(MBB, Root.getOperand(Operand), Opcode)) {
+      Patterns.push_back(Pattern);
+      return true;
+    }
+    return false;
+  };
+
+  typedef MachineCombinerPattern MCP;
+
   switch (Root.getOpcode()) {
   default:
     assert(false && "Unsupported FP instruction in combiner\n");
@@ -3714,303 +3758,117 @@ static bool getFMAPatterns(MachineInstr &Root,
   case AArch64::FADDHrr:
     assert(Root.getOperand(1).isReg() && Root.getOperand(2).isReg() &&
            "FADDHrr does not have register operands");
-    if (canCombineWithFMUL(MBB, Root.getOperand(1), AArch64::FMULHrr)) {
-      Patterns.push_back(MachineCombinerPattern::FMULADDH_OP1);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(2), AArch64::FMULHrr)) {
-      Patterns.push_back(MachineCombinerPattern::FMULADDH_OP2);
-      Found = true;
-    }
+
+    Found  = Match(AArch64::FMULHrr, 1, MCP::FMULADDH_OP1);
+    Found |= Match(AArch64::FMULHrr, 2, MCP::FMULADDH_OP2);
     break;
   case AArch64::FADDSrr:
     assert(Root.getOperand(1).isReg() && Root.getOperand(2).isReg() &&
            "FADDSrr does not have register operands");
-    if (canCombineWithFMUL(MBB, Root.getOperand(1), AArch64::FMULSrr)) {
-      Patterns.push_back(MachineCombinerPattern::FMULADDS_OP1);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                                  AArch64::FMULv1i32_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv1i32_indexed_OP1);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(2), AArch64::FMULSrr)) {
-      Patterns.push_back(MachineCombinerPattern::FMULADDS_OP2);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                                  AArch64::FMULv1i32_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv1i32_indexed_OP2);
-      Found = true;
-    }
+
+    Found |= Match(AArch64::FMULSrr, 1, MCP::FMULADDS_OP1) ||
+             Match(AArch64::FMULv1i32_indexed, 1, MCP::FMLAv1i32_indexed_OP1);
+
+    Found |= Match(AArch64::FMULSrr, 2, MCP::FMULADDS_OP2) ||
+             Match(AArch64::FMULv1i32_indexed, 2, MCP::FMLAv1i32_indexed_OP2);
     break;
   case AArch64::FADDDrr:
-    if (canCombineWithFMUL(MBB, Root.getOperand(1), AArch64::FMULDrr)) {
-      Patterns.push_back(MachineCombinerPattern::FMULADDD_OP1);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                                  AArch64::FMULv1i64_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv1i64_indexed_OP1);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(2), AArch64::FMULDrr)) {
-      Patterns.push_back(MachineCombinerPattern::FMULADDD_OP2);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                                  AArch64::FMULv1i64_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv1i64_indexed_OP2);
-      Found = true;
-    }
+    Found |= Match(AArch64::FMULDrr, 1, MCP::FMULADDD_OP1) ||
+             Match(AArch64::FMULv1i64_indexed, 1, MCP::FMLAv1i64_indexed_OP1);
+
+    Found |= Match(AArch64::FMULDrr, 2, MCP::FMULADDD_OP2) ||
+             Match(AArch64::FMULv1i64_indexed, 2, MCP::FMLAv1i64_indexed_OP2);
     break;
   case AArch64::FADDv4f16:
-    if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                           AArch64::FMULv4i16_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv4i16_indexed_OP1);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                                  AArch64::FMULv4f16)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv4f16_OP1);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                           AArch64::FMULv4i16_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv4i16_indexed_OP2);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                                  AArch64::FMULv4f16)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv4f16_OP2);
-      Found = true;
-    }
+    Found |= Match(AArch64::FMULv4i16_indexed, 1, MCP::FMLAv4i16_indexed_OP1) ||
+             Match(AArch64::FMULv4f16, 1, MCP::FMLAv4f16_OP1);
+
+    Found |= Match(AArch64::FMULv4i16_indexed, 2, MCP::FMLAv4i16_indexed_OP2) ||
+             Match(AArch64::FMULv4f16, 2, MCP::FMLAv4f16_OP2);
     break;
   case AArch64::FADDv8f16:
-    if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                           AArch64::FMULv8i16_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv8i16_indexed_OP1);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                                  AArch64::FMULv8f16)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv8f16_OP1);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                           AArch64::FMULv8i16_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv8i16_indexed_OP2);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                                  AArch64::FMULv8f16)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv8f16_OP2);
-      Found = true;
-    }
+    Found |= Match(AArch64::FMULv8i16_indexed, 1, MCP::FMLAv8i16_indexed_OP1) ||
+             Match(AArch64::FMULv8f16, 1, MCP::FMLAv8f16_OP1);
+
+    Found |= Match(AArch64::FMULv8i16_indexed, 2, MCP::FMLAv8i16_indexed_OP2) ||
+             Match(AArch64::FMULv8f16, 2, MCP::FMLAv8f16_OP2);
     break;
   case AArch64::FADDv2f32:
-    if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                           AArch64::FMULv2i32_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv2i32_indexed_OP1);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                                  AArch64::FMULv2f32)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv2f32_OP1);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                           AArch64::FMULv2i32_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv2i32_indexed_OP2);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                                  AArch64::FMULv2f32)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv2f32_OP2);
-      Found = true;
-    }
+    Found |= Match(AArch64::FMULv2i32_indexed, 1, MCP::FMLAv2i32_indexed_OP1) ||
+             Match(AArch64::FMULv2f32, 1, MCP::FMLAv2f32_OP1);
+
+    Found |= Match(AArch64::FMULv2i32_indexed, 2, MCP::FMLAv2i32_indexed_OP2) ||
+             Match(AArch64::FMULv2f32, 2, MCP::FMLAv2f32_OP2);
     break;
   case AArch64::FADDv2f64:
-    if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                           AArch64::FMULv2i64_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv2i64_indexed_OP1);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                                  AArch64::FMULv2f64)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv2f64_OP1);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                           AArch64::FMULv2i64_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv2i64_indexed_OP2);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                                  AArch64::FMULv2f64)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv2f64_OP2);
-      Found = true;
-    }
+    Found |= Match(AArch64::FMULv2i64_indexed, 1, MCP::FMLAv2i64_indexed_OP1) ||
+             Match(AArch64::FMULv2f64, 1, MCP::FMLAv2f64_OP1);
+
+    Found |= Match(AArch64::FMULv2i64_indexed, 2, MCP::FMLAv2i64_indexed_OP2) ||
+             Match(AArch64::FMULv2f64, 2, MCP::FMLAv2f64_OP2);
     break;
   case AArch64::FADDv4f32:
-    if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                           AArch64::FMULv4i32_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv4i32_indexed_OP1);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                                  AArch64::FMULv4f32)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv4f32_OP1);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                           AArch64::FMULv4i32_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv4i32_indexed_OP2);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                                  AArch64::FMULv4f32)) {
-      Patterns.push_back(MachineCombinerPattern::FMLAv4f32_OP2);
-      Found = true;
-    }
-    break;
+    Found |= Match(AArch64::FMULv4i32_indexed, 1, MCP::FMLAv4i32_indexed_OP1) ||
+             Match(AArch64::FMULv4f32, 1, MCP::FMLAv4f32_OP1);
 
+    Found |= Match(AArch64::FMULv4i32_indexed, 2, MCP::FMLAv4i32_indexed_OP2) ||
+             Match(AArch64::FMULv4f32, 2, MCP::FMLAv4f32_OP2);
+    break;
   case AArch64::FSUBHrr:
-    if (canCombineWithFMUL(MBB, Root.getOperand(1), AArch64::FMULHrr)) {
-      Patterns.push_back(MachineCombinerPattern::FMULSUBH_OP1);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(2), AArch64::FMULHrr)) {
-      Patterns.push_back(MachineCombinerPattern::FMULSUBH_OP2);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(1), AArch64::FNMULHrr)) {
-      Patterns.push_back(MachineCombinerPattern::FNMULSUBH_OP1);
-      Found = true;
-    }
+    Found  = Match(AArch64::FMULHrr, 1, MCP::FMULSUBH_OP1);
+    Found |= Match(AArch64::FMULHrr, 2, MCP::FMULSUBH_OP2);
+    Found |= Match(AArch64::FNMULHrr, 1, MCP::FNMULSUBH_OP1);
     break;
   case AArch64::FSUBSrr:
-    if (canCombineWithFMUL(MBB, Root.getOperand(1), AArch64::FMULSrr)) {
-      Patterns.push_back(MachineCombinerPattern::FMULSUBS_OP1);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(2), AArch64::FMULSrr)) {
-      Patterns.push_back(MachineCombinerPattern::FMULSUBS_OP2);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                                  AArch64::FMULv1i32_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv1i32_indexed_OP2);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(1), AArch64::FNMULSrr)) {
-      Patterns.push_back(MachineCombinerPattern::FNMULSUBS_OP1);
-      Found = true;
-    }
+    Found = Match(AArch64::FMULSrr, 1, MCP::FMULSUBS_OP1);
+
+    Found |= Match(AArch64::FMULSrr, 2, MCP::FMULSUBS_OP2) ||
+             Match(AArch64::FMULv1i32_indexed, 2, MCP::FMLSv1i32_indexed_OP2);
+
+    Found |= Match(AArch64::FNMULSrr, 1, MCP::FNMULSUBS_OP1);
     break;
   case AArch64::FSUBDrr:
-    if (canCombineWithFMUL(MBB, Root.getOperand(1), AArch64::FMULDrr)) {
-      Patterns.push_back(MachineCombinerPattern::FMULSUBD_OP1);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(2), AArch64::FMULDrr)) {
-      Patterns.push_back(MachineCombinerPattern::FMULSUBD_OP2);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                                  AArch64::FMULv1i64_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv1i64_indexed_OP2);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(1), AArch64::FNMULDrr)) {
-      Patterns.push_back(MachineCombinerPattern::FNMULSUBD_OP1);
-      Found = true;
-    }
+    Found = Match(AArch64::FMULDrr, 1, MCP::FMULSUBD_OP1);
+
+    Found |= Match(AArch64::FMULDrr, 2, MCP::FMULSUBD_OP2) ||
+             Match(AArch64::FMULv1i64_indexed, 2, MCP::FMLSv1i64_indexed_OP2);
+
+    Found |= Match(AArch64::FNMULDrr, 1, MCP::FNMULSUBD_OP1);
     break;
   case AArch64::FSUBv4f16:
-    if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                           AArch64::FMULv4i16_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv4i16_indexed_OP2);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                                  AArch64::FMULv4f16)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv4f16_OP2);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                           AArch64::FMULv4i16_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv2i32_indexed_OP1);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                                  AArch64::FMULv4f16)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv2f32_OP1);
-      Found = true;
-    }
+    Found |= Match(AArch64::FMULv4i16_indexed, 2, MCP::FMLSv4i16_indexed_OP2) ||
+             Match(AArch64::FMULv4f16, 2, MCP::FMLSv4f16_OP2);
+
+    Found |= Match(AArch64::FMULv4i16_indexed, 1, MCP::FMLSv4i16_indexed_OP1) ||
+             Match(AArch64::FMULv4f16, 1, MCP::FMLSv4f16_OP1);
     break;
   case AArch64::FSUBv8f16:
-    if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                           AArch64::FMULv8i16_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv8i16_indexed_OP2);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                                  AArch64::FMULv8f16)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv8f16_OP2);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                           AArch64::FMULv8i16_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv8i16_indexed_OP1);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                                  AArch64::FMULv8f16)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv8f16_OP1);
-      Found = true;
-    }
+    Found |= Match(AArch64::FMULv8i16_indexed, 2, MCP::FMLSv8i16_indexed_OP2) ||
+             Match(AArch64::FMULv8f16, 2, MCP::FMLSv8f16_OP2);
+
+    Found |= Match(AArch64::FMULv8i16_indexed, 1, MCP::FMLSv8i16_indexed_OP1) ||
+             Match(AArch64::FMULv8f16, 1, MCP::FMLSv8f16_OP1);
     break;
   case AArch64::FSUBv2f32:
-    if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                           AArch64::FMULv2i32_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv2i32_indexed_OP2);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                                  AArch64::FMULv2f32)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv2f32_OP2);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                           AArch64::FMULv2i32_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv2i32_indexed_OP1);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                                  AArch64::FMULv2f32)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv2f32_OP1);
-      Found = true;
-    }
+    Found |= Match(AArch64::FMULv2i32_indexed, 2, MCP::FMLSv2i32_indexed_OP2) ||
+             Match(AArch64::FMULv2f32, 2, MCP::FMLSv2f32_OP2);
+
+    Found |= Match(AArch64::FMULv2i32_indexed, 1, MCP::FMLSv2i32_indexed_OP1) ||
+             Match(AArch64::FMULv2f32, 1, MCP::FMLSv2f32_OP1);
     break;
   case AArch64::FSUBv2f64:
-    if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                           AArch64::FMULv2i64_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv2i64_indexed_OP2);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                                  AArch64::FMULv2f64)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv2f64_OP2);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                           AArch64::FMULv2i64_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv2i64_indexed_OP1);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                                  AArch64::FMULv2f64)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv2f64_OP1);
-      Found = true;
-    }
+    Found |= Match(AArch64::FMULv2i64_indexed, 2, MCP::FMLSv2i64_indexed_OP2) ||
+             Match(AArch64::FMULv2f64, 2, MCP::FMLSv2f64_OP2);
+
+    Found |= Match(AArch64::FMULv2i64_indexed, 1, MCP::FMLSv2i64_indexed_OP1) ||
+             Match(AArch64::FMULv2f64, 1, MCP::FMLSv2f64_OP1);
     break;
   case AArch64::FSUBv4f32:
-    if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                           AArch64::FMULv4i32_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv4i32_indexed_OP2);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(2),
-                                  AArch64::FMULv4f32)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv4f32_OP2);
-      Found = true;
-    }
-    if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                           AArch64::FMULv4i32_indexed)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv4i32_indexed_OP1);
-      Found = true;
-    } else if (canCombineWithFMUL(MBB, Root.getOperand(1),
-                                  AArch64::FMULv4f32)) {
-      Patterns.push_back(MachineCombinerPattern::FMLSv4f32_OP1);
-      Found = true;
-    }
+    Found |= Match(AArch64::FMULv4i32_indexed, 2, MCP::FMLSv4i32_indexed_OP2) ||
+             Match(AArch64::FMULv4f32, 2, MCP::FMLSv4f32_OP2);
+
+    Found |= Match(AArch64::FMULv4i32_indexed, 1, MCP::FMLSv4i32_indexed_OP1) ||
+             Match(AArch64::FMULv4f32, 1, MCP::FMLSv4f32_OP1);
     break;
   }
   return Found;
@@ -4063,6 +3921,7 @@ bool AArch64InstrInfo::isThroughputPattern(
   case MachineCombinerPattern::FMLAv4f32_OP2:
   case MachineCombinerPattern::FMLAv4i32_indexed_OP1:
   case MachineCombinerPattern::FMLAv4i32_indexed_OP2:
+  case MachineCombinerPattern::FMLSv4i16_indexed_OP1:
   case MachineCombinerPattern::FMLSv4i16_indexed_OP2:
   case MachineCombinerPattern::FMLSv8i16_indexed_OP1:
   case MachineCombinerPattern::FMLSv8i16_indexed_OP2:
@@ -4070,6 +3929,7 @@ bool AArch64InstrInfo::isThroughputPattern(
   case MachineCombinerPattern::FMLSv1i64_indexed_OP2:
   case MachineCombinerPattern::FMLSv2i32_indexed_OP2:
   case MachineCombinerPattern::FMLSv2i64_indexed_OP2:
+  case MachineCombinerPattern::FMLSv4f16_OP1:
   case MachineCombinerPattern::FMLSv4f16_OP2:
   case MachineCombinerPattern::FMLSv8f16_OP1:
   case MachineCombinerPattern::FMLSv8f16_OP2:
@@ -4672,6 +4532,26 @@ void AArch64InstrInfo::genAlternativeCodeSequence(
                            FMAInstKind::Indexed);
     break;
 
+  case MachineCombinerPattern::FMLSv4f16_OP1:
+  case MachineCombinerPattern::FMLSv4i16_indexed_OP1: {
+    RC = &AArch64::FPR64RegClass;
+    Register NewVR = MRI.createVirtualRegister(RC);
+    MachineInstrBuilder MIB1 =
+        BuildMI(MF, Root.getDebugLoc(), TII->get(AArch64::FNEGv4f16), NewVR)
+            .add(Root.getOperand(2));
+    InsInstrs.push_back(MIB1);
+    InstrIdxForVirtReg.insert(std::make_pair(NewVR, 0));
+    if (Pattern == MachineCombinerPattern::FMLSv4f16_OP1) {
+      Opc = AArch64::FMLAv4f16;
+      MUL = genFusedMultiply(MF, MRI, TII, Root, InsInstrs, 1, Opc, RC,
+                             FMAInstKind::Accumulator, &NewVR);
+    } else {
+      Opc = AArch64::FMLAv4i16_indexed;
+      MUL = genFusedMultiply(MF, MRI, TII, Root, InsInstrs, 1, Opc, RC,
+                             FMAInstKind::Indexed, &NewVR);
+    }
+    break;
+  }
   case MachineCombinerPattern::FMLSv4f16_OP2:
     RC = &AArch64::FPR64RegClass;
     Opc = AArch64::FMLSv4f16;
@@ -4700,18 +4580,25 @@ void AArch64InstrInfo::genAlternativeCodeSequence(
     break;
 
   case MachineCombinerPattern::FMLSv8f16_OP1:
+  case MachineCombinerPattern::FMLSv8i16_indexed_OP1: {
     RC = &AArch64::FPR128RegClass;
-    Opc = AArch64::FMLSv8f16;
-    MUL = genFusedMultiply(MF, MRI, TII, Root, InsInstrs, 1, Opc, RC,
-                           FMAInstKind::Accumulator);
+    Register NewVR = MRI.createVirtualRegister(RC);
+    MachineInstrBuilder MIB1 =
+        BuildMI(MF, Root.getDebugLoc(), TII->get(AArch64::FNEGv8f16), NewVR)
+            .add(Root.getOperand(2));
+    InsInstrs.push_back(MIB1);
+    InstrIdxForVirtReg.insert(std::make_pair(NewVR, 0));
+    if (Pattern == MachineCombinerPattern::FMLSv8f16_OP1) {
+      Opc = AArch64::FMLAv8f16;
+      MUL = genFusedMultiply(MF, MRI, TII, Root, InsInstrs, 1, Opc, RC,
+                             FMAInstKind::Accumulator, &NewVR);
+    } else {
+      Opc = AArch64::FMLAv8i16_indexed;
+      MUL = genFusedMultiply(MF, MRI, TII, Root, InsInstrs, 1, Opc, RC,
+                             FMAInstKind::Indexed, &NewVR);
+    }
     break;
-  case MachineCombinerPattern::FMLSv8i16_indexed_OP1:
-    RC = &AArch64::FPR128RegClass;
-    Opc = AArch64::FMLSv8i16_indexed;
-    MUL = genFusedMultiply(MF, MRI, TII, Root, InsInstrs, 1, Opc, RC,
-                           FMAInstKind::Indexed);
-    break;
-
+  }
   case MachineCombinerPattern::FMLSv8f16_OP2:
     RC = &AArch64::FPR128RegClass;
     Opc = AArch64::FMLSv8f16;

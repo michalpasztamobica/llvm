@@ -116,7 +116,7 @@ public:
   /// \name Vector TTI Implementations
   /// @{
 
-  unsigned getNumberOfRegisters(bool Vector);
+  unsigned getNumberOfRegisters(unsigned ClassID) const;
   unsigned getRegisterBitWidth(bool Vector) const;
   unsigned getLoadStoreVecRegBitWidth(unsigned AS) const;
   unsigned getMaxInterleaveFactor(unsigned VF);
@@ -185,10 +185,10 @@ public:
   bool isLSRCostLess(TargetTransformInfo::LSRCost &C1,
                      TargetTransformInfo::LSRCost &C2);
   bool canMacroFuseCmp();
-  bool isLegalMaskedLoad(Type *DataType);
-  bool isLegalMaskedStore(Type *DataType);
-  bool isLegalNTLoad(Type *DataType, llvm::Align Alignment);
-  bool isLegalNTStore(Type *DataType, llvm::Align Alignment);
+  bool isLegalMaskedLoad(Type *DataType, MaybeAlign Alignment);
+  bool isLegalMaskedStore(Type *DataType, MaybeAlign Alignment);
+  bool isLegalNTLoad(Type *DataType, Align Alignment);
+  bool isLegalNTStore(Type *DataType, Align Alignment);
   bool isLegalMaskedGather(Type *DataType);
   bool isLegalMaskedScatter(Type *DataType);
   bool isLegalMaskedExpandLoad(Type *DataType);

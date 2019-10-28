@@ -720,7 +720,6 @@ public:
   }
   bool isForwardDecl() const { return getFlags() & FlagFwdDecl; }
   bool isAppleBlockExtension() const { return getFlags() & FlagAppleBlock; }
-  bool isBlockByrefStruct() const { return getFlags() & FlagBlockByrefStruct; }
   bool isVirtual() const { return getFlags() & FlagVirtual; }
   bool isArtificial() const { return getFlags() & FlagArtificial; }
   bool isObjectPointer() const { return getFlags() & FlagObjectPointer; }
@@ -2825,7 +2824,7 @@ public:
   /// (This is the only configuration of entry values that is supported.)
   bool isEntryValue() const {
     return getNumElements() > 0 &&
-           getElement(0) == dwarf::DW_OP_entry_value;
+           getElement(0) == dwarf::DW_OP_LLVM_entry_value;
   }
 };
 

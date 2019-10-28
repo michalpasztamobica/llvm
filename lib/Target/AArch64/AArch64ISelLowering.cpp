@@ -307,7 +307,7 @@ AArch64TargetLowering::AArch64TargetLowering(const TargetMachine &TM,
   // AArch64 lacks both left-rotate and popcount instructions.
   setOperationAction(ISD::ROTL, MVT::i32, Expand);
   setOperationAction(ISD::ROTL, MVT::i64, Expand);
-  for (MVT VT : MVT::vector_valuetypes()) {
+  for (MVT VT : MVT::fixedlen_vector_valuetypes()) {
     setOperationAction(ISD::ROTL, VT, Expand);
     setOperationAction(ISD::ROTR, VT, Expand);
   }
@@ -321,7 +321,7 @@ AArch64TargetLowering::AArch64TargetLowering(const TargetMachine &TM,
 
   setOperationAction(ISD::SDIVREM, MVT::i32, Expand);
   setOperationAction(ISD::SDIVREM, MVT::i64, Expand);
-  for (MVT VT : MVT::vector_valuetypes()) {
+  for (MVT VT : MVT::fixedlen_vector_valuetypes()) {
     setOperationAction(ISD::SDIVREM, VT, Expand);
     setOperationAction(ISD::UDIVREM, VT, Expand);
   }
@@ -641,11 +641,10 @@ AArch64TargetLowering::AArch64TargetLowering(const TargetMachine &TM,
   EnableExtLdPromotion = true;
 
   // Set required alignment.
-  setMinFunctionAlignment(llvm::Align(4));
+  setMinFunctionAlignment(Align(4));
   // Set preferred alignments.
-  setPrefLoopAlignment(llvm::Align(1ULL << STI.getPrefLoopLogAlignment()));
-  setPrefFunctionAlignment(
-      llvm::Align(1ULL << STI.getPrefFunctionLogAlignment()));
+  setPrefLoopAlignment(Align(1ULL << STI.getPrefLoopLogAlignment()));
+  setPrefFunctionAlignment(Align(1ULL << STI.getPrefFunctionLogAlignment()));
 
   // Only change the limit for entries in a jump table if specified by
   // the sub target, but not at the command line.
@@ -754,7 +753,7 @@ AArch64TargetLowering::AArch64TargetLowering(const TargetMachine &TM,
     setTruncStoreAction(MVT::v2i32, MVT::v2i16, Expand);
     // Likewise, narrowing and extending vector loads/stores aren't handled
     // directly.
-    for (MVT VT : MVT::vector_valuetypes()) {
+    for (MVT VT : MVT::fixedlen_vector_valuetypes()) {
       setOperationAction(ISD::SIGN_EXTEND_INREG, VT, Expand);
 
       if (VT == MVT::v16i8 || VT == MVT::v8i16 || VT == MVT::v4i32) {
@@ -770,7 +769,7 @@ AArch64TargetLowering::AArch64TargetLowering(const TargetMachine &TM,
       setOperationAction(ISD::BSWAP, VT, Expand);
       setOperationAction(ISD::CTTZ, VT, Expand);
 
-      for (MVT InnerVT : MVT::vector_valuetypes()) {
+      for (MVT InnerVT : MVT::fixedlen_vector_valuetypes()) {
         setTruncStoreAction(VT, InnerVT, Expand);
         setLoadExtAction(ISD::SEXTLOAD, VT, InnerVT, Expand);
         setLoadExtAction(ISD::ZEXTLOAD, VT, InnerVT, Expand);
@@ -800,6 +799,13 @@ AArch64TargetLowering::AArch64TargetLowering(const TargetMachine &TM,
     }
 
     setTruncStoreAction(MVT::v4i16, MVT::v4i8, Custom);
+  }
+
+  if (Subtarget->hasSVE()) {
+    for (MVT VT : MVT::integer_scalable_vector_valuetypes()) {
+      if (isTypeLegal(VT) && VT.getVectorElementType() != MVT::i1)
+        setOperationAction(ISD::SPLAT_VECTOR, VT, Custom);
+    }
   }
 
   PredictableSelectIsExpensive = Subtarget->predictableSelectIsExpensive();
@@ -1301,6 +1307,10 @@ const char *AArch64TargetLowering::getTargetNodeName(unsigned Opcode) const {
   case AArch64ISD::STZG:              return "AArch64ISD::STZG";
   case AArch64ISD::ST2G:              return "AArch64ISD::ST2G";
   case AArch64ISD::STZ2G:             return "AArch64ISD::STZ2G";
+  case AArch64ISD::SUNPKHI:           return "AArch64ISD::SUNPKHI";
+  case AArch64ISD::SUNPKLO:           return "AArch64ISD::SUNPKLO";
+  case AArch64ISD::UUNPKHI:           return "AArch64ISD::UUNPKHI";
+  case AArch64ISD::UUNPKLO:           return "AArch64ISD::UUNPKLO";
   }
   return nullptr;
 }
@@ -2839,6 +2849,19 @@ SDValue AArch64TargetLowering::LowerINTRINSIC_WO_CHAIN(SDValue Op,
     return DAG.getNode(ISD::UMIN, dl, Op.getValueType(),
                        Op.getOperand(1), Op.getOperand(2));
 
+  case Intrinsic::aarch64_sve_sunpkhi:
+    return DAG.getNode(AArch64ISD::SUNPKHI, dl, Op.getValueType(),
+                       Op.getOperand(1));
+  case Intrinsic::aarch64_sve_sunpklo:
+    return DAG.getNode(AArch64ISD::SUNPKLO, dl, Op.getValueType(),
+                       Op.getOperand(1));
+  case Intrinsic::aarch64_sve_uunpkhi:
+    return DAG.getNode(AArch64ISD::UUNPKHI, dl, Op.getValueType(),
+                       Op.getOperand(1));
+  case Intrinsic::aarch64_sve_uunpklo:
+    return DAG.getNode(AArch64ISD::UUNPKLO, dl, Op.getValueType(),
+                       Op.getOperand(1));
+
   case Intrinsic::localaddress: {
     const auto &MF = DAG.getMachineFunction();
     const auto *RegInfo = Subtarget->getRegisterInfo();
@@ -3003,6 +3026,8 @@ SDValue AArch64TargetLowering::LowerOperation(SDValue Op,
     return LowerBUILD_VECTOR(Op, DAG);
   case ISD::VECTOR_SHUFFLE:
     return LowerVECTOR_SHUFFLE(Op, DAG);
+  case ISD::SPLAT_VECTOR:
+    return LowerSPLAT_VECTOR(Op, DAG);
   case ISD::EXTRACT_SUBVECTOR:
     return LowerEXTRACT_SUBVECTOR(Op, DAG);
   case ISD::SRA:
@@ -3693,6 +3718,7 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
   bool IsVarArg = CLI.IsVarArg;
 
   MachineFunction &MF = DAG.getMachineFunction();
+  MachineFunction::CallSiteInfo CSInfo;
   bool IsThisReturn = false;
 
   AArch64FunctionInfo *FuncInfo = MF.getInfo<AArch64FunctionInfo>();
@@ -3890,9 +3916,20 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
                          })
                 ->second;
         Bits = DAG.getNode(ISD::OR, DL, Bits.getValueType(), Bits, Arg);
+        // Call site info is used for function's parameter entry value
+        // tracking. For now we track only simple cases when parameter
+        // is transferred through whole register.
+        CSInfo.erase(std::remove_if(CSInfo.begin(), CSInfo.end(),
+                                    [&VA](MachineFunction::ArgRegPair ArgReg) {
+                                      return ArgReg.Reg == VA.getLocReg();
+                                    }),
+                     CSInfo.end());
       } else {
         RegsToPass.emplace_back(VA.getLocReg(), Arg);
         RegsUsed.insert(VA.getLocReg());
+        const TargetOptions &Options = DAG.getTarget().Options;
+        if (Options.EnableDebugEntryValues)
+          CSInfo.emplace_back(VA.getLocReg(), i);
       }
     } else {
       assert(VA.isMemLoc());
@@ -4073,12 +4110,15 @@ AArch64TargetLowering::LowerCall(CallLoweringInfo &CLI,
   // actual call instruction.
   if (IsTailCall) {
     MF.getFrameInfo().setHasTailCall();
-    return DAG.getNode(AArch64ISD::TC_RETURN, DL, NodeTys, Ops);
+    SDValue Ret = DAG.getNode(AArch64ISD::TC_RETURN, DL, NodeTys, Ops);
+    DAG.addCallSiteInfo(Ret.getNode(), std::move(CSInfo));
+    return Ret;
   }
 
   // Returns a chain and a flag for retval copy to use.
   Chain = DAG.getNode(AArch64ISD::CALL, DL, NodeTys, Ops);
   InFlag = Chain.getValue(1);
+  DAG.addCallSiteInfo(Chain.getNode(), std::move(CSInfo));
 
   uint64_t CalleePopBytes =
       DoesCalleeRestoreStack(CallConv, TailCallOpt) ? alignTo(NumBytes, 16) : 0;
@@ -5490,9 +5530,9 @@ SDValue AArch64TargetLowering::LowerSPONENTRY(SDValue Op,
 
 // FIXME? Maybe this could be a TableGen attribute on some registers and
 // this table could be generated automatically from RegInfo.
-unsigned AArch64TargetLowering::getRegisterByName(const char* RegName, EVT VT,
-                                                  SelectionDAG &DAG) const {
-  unsigned Reg = MatchRegisterName(RegName);
+Register AArch64TargetLowering::
+getRegisterByName(const char* RegName, EVT VT, const MachineFunction &MF) const {
+  Register Reg = MatchRegisterName(RegName);
   if (AArch64::X1 <= Reg && Reg <= AArch64::X28) {
     const MCRegisterInfo *MRI = Subtarget->getRegisterInfo();
     unsigned DwarfRegNum = MRI->getDwarfRegNum(Reg, false);
@@ -5837,6 +5877,21 @@ const char *AArch64TargetLowering::LowerXConstraint(EVT ConstraintVT) const {
   return "r";
 }
 
+enum PredicateConstraint {
+  Upl,
+  Upa,
+  Invalid
+};
+
+static PredicateConstraint parsePredicateConstraint(StringRef Constraint) {
+  PredicateConstraint P = PredicateConstraint::Invalid;
+  if (Constraint == "Upa")
+    P = PredicateConstraint::Upa;
+  if (Constraint == "Upl")
+    P = PredicateConstraint::Upl;
+  return P;
+}
+
 /// getConstraintType - Given a constraint letter, return the type of
 /// constraint it is for this target.
 AArch64TargetLowering::ConstraintType
@@ -5866,7 +5921,9 @@ AArch64TargetLowering::getConstraintType(StringRef Constraint) const {
     case 'S': // A symbolic address
       return C_Other;
     }
-  }
+  } else if (parsePredicateConstraint(Constraint) !=
+             PredicateConstraint::Invalid)
+      return C_RegisterClass;
   return TargetLowering::getConstraintType(Constraint);
 }
 
@@ -5896,6 +5953,10 @@ AArch64TargetLowering::getSingleConstraintMatchWeight(
     break;
   case 'z':
     weight = CW_Constant;
+    break;
+  case 'U':
+    if (parsePredicateConstraint(constraint) != PredicateConstraint::Invalid)
+      weight = CW_Register;
     break;
   }
   return weight;
@@ -5940,6 +6001,14 @@ AArch64TargetLowering::getRegForInlineAsmConstraint(
       if (VT.isScalableVector())
         return std::make_pair(0U, &AArch64::ZPR_3bRegClass);
       break;
+    }
+  } else {
+    PredicateConstraint PC = parsePredicateConstraint(Constraint);
+    if (PC != PredicateConstraint::Invalid) {
+      assert(VT.isScalableVector());
+      bool restricted = (PC == PredicateConstraint::Upl);
+      return restricted ? std::make_pair(0U, &AArch64::PPR_3bRegClass)
+                          : std::make_pair(0U, &AArch64::PPRRegClass);
     }
   }
   if (StringRef("{cc}").equals_lower(Constraint))
@@ -6993,6 +7062,41 @@ SDValue AArch64TargetLowering::LowerVECTOR_SHUFFLE(SDValue Op,
   }
 
   return GenerateTBL(Op, ShuffleMask, DAG);
+}
+
+SDValue AArch64TargetLowering::LowerSPLAT_VECTOR(SDValue Op,
+                                                 SelectionDAG &DAG) const {
+  SDLoc dl(Op);
+  EVT VT = Op.getValueType();
+  EVT ElemVT = VT.getScalarType();
+
+  SDValue SplatVal = Op.getOperand(0);
+
+  // Extend input splat value where needed to fit into a GPR (32b or 64b only)
+  // FPRs don't have this restriction.
+  switch (ElemVT.getSimpleVT().SimpleTy) {
+  case MVT::i8:
+  case MVT::i16:
+    SplatVal = DAG.getAnyExtOrTrunc(SplatVal, dl, MVT::i32);
+    break;
+  case MVT::i64:
+    SplatVal = DAG.getAnyExtOrTrunc(SplatVal, dl, MVT::i64);
+    break;
+  case MVT::i32:
+    // Fine as is
+    break;
+  // TODO: we can support splats of i1s and float types, but haven't added
+  // patterns yet.
+  case MVT::i1:
+  case MVT::f16:
+  case MVT::f32:
+  case MVT::f64:
+  default:
+    llvm_unreachable("Unsupported SPLAT_VECTOR input operand type");
+    break;
+  }
+
+  return DAG.getNode(AArch64ISD::DUP, dl, VT, SplatVal);
 }
 
 static bool resolveBuildVector(BuildVectorSDNode *BVN, APInt &CnstBits,
@@ -8483,7 +8587,7 @@ bool AArch64TargetLowering::isExtFreeImpl(const Instruction *Ext) const {
       // Get the shift amount based on the scaling factor:
       // log2(sizeof(IdxTy)) - log2(8).
       uint64_t ShiftAmt =
-          countTrailingZeros(DL.getTypeStoreSizeInBits(IdxTy)) - 3;
+        countTrailingZeros(DL.getTypeStoreSizeInBits(IdxTy).getFixedSize()) - 3;
       // Is the constant foldable in the shift of the addressing mode?
       // I.e., shift amount is between 1 and 4 inclusive.
       if (ShiftAmt == 0 || ShiftAmt > 4)
@@ -10303,6 +10407,14 @@ static SDValue tryCombineShiftImm(unsigned IID, SDNode *N, SelectionDAG &DAG) {
     Opcode = AArch64ISD::SQSHLU_I;
     IsRightShift = false;
     break;
+  case Intrinsic::aarch64_neon_sshl:
+  case Intrinsic::aarch64_neon_ushl:
+    // For positive shift amounts we can use SHL, as ushl/sshl perform a regular
+    // left shift for positive shift amounts. Below, we only replace the current
+    // node with VSHL, if this condition is met.
+    Opcode = AArch64ISD::VSHL;
+    IsRightShift = false;
+    break;
   }
 
   if (IsRightShift && ShiftAmount <= -1 && ShiftAmount >= -(int)ElemBits) {
@@ -10389,6 +10501,8 @@ static SDValue performIntrinsicCombine(SDNode *N,
   case Intrinsic::aarch64_neon_sqshlu:
   case Intrinsic::aarch64_neon_srshl:
   case Intrinsic::aarch64_neon_urshl:
+  case Intrinsic::aarch64_neon_sshl:
+  case Intrinsic::aarch64_neon_ushl:
     return tryCombineShiftImm(IID, N, DAG);
   case Intrinsic::aarch64_crc32b:
   case Intrinsic::aarch64_crc32cb:

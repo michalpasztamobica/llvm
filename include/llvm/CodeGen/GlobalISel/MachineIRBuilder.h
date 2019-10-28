@@ -1361,8 +1361,9 @@ public:
 
   /// Build and insert \p Res = G_FADD \p Op0, \p Op1
   MachineInstrBuilder buildFAdd(const DstOp &Dst, const SrcOp &Src0,
-                                const SrcOp &Src1) {
-    return buildInstr(TargetOpcode::G_FADD, {Dst}, {Src0, Src1});
+                                const SrcOp &Src1,
+                                Optional<unsigned> Flags = None) {
+    return buildInstr(TargetOpcode::G_FADD, {Dst}, {Src0, Src1}, Flags);
   }
 
   /// Build and insert \p Res = G_FSUB \p Op0, \p Op1
@@ -1385,8 +1386,9 @@ public:
   }
 
   /// Build and insert \p Res = G_FNEG \p Op0
-  MachineInstrBuilder buildFNeg(const DstOp &Dst, const SrcOp &Src0) {
-    return buildInstr(TargetOpcode::G_FNEG, {Dst}, {Src0});
+  MachineInstrBuilder buildFNeg(const DstOp &Dst, const SrcOp &Src0,
+                                Optional<unsigned> Flags = None) {
+    return buildInstr(TargetOpcode::G_FNEG, {Dst}, {Src0}, Flags);
   }
 
   /// Build and insert \p Res = G_FABS \p Op0

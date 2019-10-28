@@ -506,7 +506,7 @@ bool AArch64ExpandPseudo::expandMI(MachineBasicBlock &MBB,
         unsigned Reg32 = TRI->getSubReg(DstReg, AArch64::sub_32);
         unsigned DstFlags = MI.getOperand(0).getTargetFlags();
         MIB2 = BuildMI(MBB, MBBI, MI.getDebugLoc(), TII->get(AArch64::LDRWui))
-                   .addDef(Reg32, RegState::Dead)
+                   .addDef(Reg32)
                    .addReg(DstReg, RegState::Kill)
                    .addReg(DstReg, DstFlags | RegState::Implicit);
       } else {
@@ -674,7 +674,7 @@ bool AArch64ExpandPseudo::expandMI(MachineBasicBlock &MBB,
      int BaseOffset = -AFI->getTaggedBasePointerOffset();
      unsigned FrameReg;
      StackOffset FrameRegOffset = TFI->resolveFrameOffsetReference(
-         MF, BaseOffset, false /*isFixed*/, FrameReg,
+         MF, BaseOffset, false /*isFixed*/, false /*isSVE*/, FrameReg,
          /*PreferFP=*/false,
          /*ForSimm=*/true);
      Register SrcReg = FrameReg;
