@@ -14,16 +14,41 @@ jobs:
     strategy:
       matrix:
         target: [X86, AArch64, PowerPC]
+        cc: [gcc]
+        cpp: [g++]
+        version: [9]
+        include:
+          - target: X86
+            cc: gcc
+            cpp: g++
+            version: 10
+          - target: X86
+            cc: clang
+            cpp: clang++
+            version: 10
 
     steps:
+      - if: matrix.cc == 'clang'
+        run: |
+          sudo apt install llvm-9
+
+      - if: matrix.cc == 'gcc' && matrix.version == '10'
+        run: |
+          sudo add-apt-repository ppa:ubuntu-toolchain-r/ppa
+          sudo apt install gcc-10 g++-10
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 10
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 20
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 10
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-10 20
+
       - name: Check tools
         run: |
-          pwd
           git --version
           cmake --version
           make --version
-          gcc --version
-          
+          ${{ matrix.cc }}-${{ matrix.version }} --version
+          ${{ matrix.cpp }}-${{ matrix.version }} --version
+
       - name: Build llvm
         run: |
           # exit the llvm dir, so the path is the same on subsequent projects
@@ -37,8 +62,8 @@ jobs:
           CMAKE_OPTIONS="-DLLVM_TARGETS_TO_BUILD=${{ matrix.target }} \
             -DCMAKE_INSTALL_PREFIX=/usr/local \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=/usr/bin/gcc-9 \
-            -DCMAKE_CXX_COMPILER=/usr/bin/g++-9"
+            -DCMAKE_C_COMPILER=/usr/bin/${{ matrix.cc }}-${{ matrix.version }} \
+            -DCMAKE_CXX_COMPILER=/usr/bin/${{ matrix.cpp }}-${{ matrix.version }}"
           mkdir -p build && cd build
           cmake $CMAKE_OPTIONS ..
           make -j$(nproc)
